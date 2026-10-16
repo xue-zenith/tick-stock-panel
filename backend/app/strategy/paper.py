@@ -596,12 +596,21 @@ def _append_fill(data_dir: Path, fill: dict, account_id: str = DEFAULT_ACCOUNT_I
         f.write(json.dumps(fill, ensure_ascii=False) + "\n")
 
 
-def _materialize(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> None:
-    """由台账重建 positions.json (每次成交后调用, 保持物化缓存与台账一致)。"""
+def _materialize(
+    data_dir: Path,
+    account_id: str = DEFAULT_ACCOUNT_ID,
+    settle_day: str | None = None,
+) -> None:
+    """由台账重建 positions.json (每次成交后调用, 保持物化缓存与台账一致)。
+
+    settle_day: 撮合日期 (YYYY-MM-DD)。传入时用该日期计算 T+1 可卖数量,
+    否则用 cn_today()。盘后管道在凌晨运行时 cn_today() 可能已跨日,
+    传入 settle_day 可避免错误解锁当日买入的股票。
+    """
     positions, _cash = replay_positions(data_dir, account_id=account_id)
     acc = get_account(data_dir, account_id)
     if acc is not None:
-        today = cn_today().isoformat()
+        today = settle_day or cn_today().isoformat()
         for pos in positions.values():
             pos["available_qty"] = _available_of(pos, today)
     atomic_write_text(
@@ -713,7 +722,7 @@ def _fill_order(data_dir: Path, order: dict, raw_price: float, day: str, account
     _cash = replay_positions(data_dir, account_id=account_id)[1]
     acc["cash"] = _cash
     save_account(data_dir, acc, account_id)
-    _materialize(data_dir, account_id)
+    _materialize(data_dir, account_id, settle_day=day)
 
     # 成交落告警记录 (监控中心触发历史可见; source=paper 走前端通用渲染)
     try:
@@ -1001,7 +1010,7 @@ def settle_day(data_dir: Path, day: str, account_id: str = DEFAULT_ACCOUNT_ID) -
             }, account_id)
             summary["corp_actions"] += 1
         if summary["corp_actions"]:
-            _materialize(data_dir, account_id)
+            _materialize(data_dir, account_id, settle_day=day)
 
         # 定版净值 (幂等: 重写当日行); 顺带记录沪深300 收盘作基准对比
         nav = daily_nav(data_dir, day, account_id=account_id)
