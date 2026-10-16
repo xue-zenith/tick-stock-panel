@@ -76,8 +76,9 @@ def _last_close(data_dir: Path, symbol: str, asset_type: str) -> float | None:
         return None
     try:
         import polars as pl
+        from app.parquet import scan_parquet_compat
         df = (
-            pl.scan_parquet((base / "**" / "*.parquet").as_posix())
+            scan_parquet_compat((base / "**" / "*.parquet").as_posix())
             .filter(pl.col("symbol") == symbol)
             .sort("date")
             .select(pl.col("close").last())

@@ -832,12 +832,11 @@ def _daily_path(data_dir: Path, asset_type: str) -> Path:
 def read_daily_bar(data_dir: Path, symbol: str, asset_type: str, day: str) -> dict | None:
     """读某标的某日 raw OHLC (不复权); 无数据返回 None。"""
     base = _daily_path(data_dir, asset_type)
-    if not base.exists():
-        return None
+    day_path = base / f"date={day}"
     try:
         df = (
-            pl.scan_parquet((base / "**" / "*.parquet").as_posix())
-            .filter((pl.col("symbol") == symbol) & (pl.col("date") == _date.fromisoformat(day)))
+            pl.scan_parquet((day_path / "*.parquet").as_posix())
+            .filter(pl.col("symbol") == symbol)
             .select(["open", "close"])
             .collect()
         )
@@ -856,7 +855,8 @@ def _prev_close(data_dir: Path, symbol: str, asset_type: str, day: str) -> float
         return None
     try:
         df = (
-            pl.scan_parquet((base / "**" / "*.parquet").as_posix())
+            pl.scan_parquet((base / "**" / "*.parquet").as_posix(),
+                            allow_missing_columns=True, extra_columns="ignore")
             .filter((pl.col("symbol") == symbol) & (pl.col("date") < _date.fromisoformat(day)))
             .sort("date")
             .select(pl.col("close").last())
@@ -873,12 +873,11 @@ def _prev_close(data_dir: Path, symbol: str, asset_type: str, day: str) -> float
 def _index_close(data_dir: Path, day: str) -> float | None:
     """沪深300 当日 raw close (基准对比); 指数日K缺失返回 None。"""
     base = data_dir / "kline_index_daily"
-    if not base.exists():
-        return None
+    day_path = base / f"date={day}"
     try:
         df = (
-            pl.scan_parquet((base / "**" / "*.parquet").as_posix())
-            .filter((pl.col("symbol") == "000300.SH") & (pl.col("date") == _date.fromisoformat(day)))
+            pl.scan_parquet((day_path / "*.parquet").as_posix())
+            .filter(pl.col("symbol") == "000300.SH")
             .select("close")
             .collect()
         )
