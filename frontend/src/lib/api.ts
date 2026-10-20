@@ -420,6 +420,8 @@ export interface ScreenerCachedSummary {
   results: Record<string, ScreenerResultSummary>
   today_ever_counts: Record<string, number>
   updated_at: number | null
+  /** 分钟策略后台批量计算中尚未完成的策略 (结果不落盘, 由 handle 快照合入) */
+  minute_pending?: string[]
 }
 
 /** run_all 渐进式返回: 快策略已算完, 慢策略后台继续算 */
@@ -792,6 +794,15 @@ export interface AuctionBenchmarkPayload {
 }
 
 // ===== Strategy Engine =====
+/** 参数级联显隐条件 (UI 元数据, 后端原样透传)。三种形态可递归组合:
+ *  { param, in } — values[param] ∈ in;  { all: [...] } — 全部成立;  { any: [...] } — 任一成立 */
+export interface ParamVisibleIf {
+  param?: string
+  in?: (string | number | boolean)[]
+  all?: ParamVisibleIf[]
+  any?: ParamVisibleIf[]
+}
+
 export interface StrategyParamDef {
   id: string
   label: string
@@ -801,6 +812,12 @@ export interface StrategyParamDef {
   max?: number
   step?: number
   options?: string[]
+  /** UI 元数据: 分组节标题 (相同组名的相邻参数归并) */
+  group?: string
+  /** UI 元数据: 级联显隐 — 条件成立时显示 (见 ParamVisibleIf) */
+  visible_if?: ParamVisibleIf
+  /** UI 元数据: select 各选项被选中时批量应用的参数值 (如标的池预设 → 开关+默认值) */
+  option_applies?: Record<string, Record<string, string | number | boolean>>
 }
 
 export interface CompositeChildInfo {
@@ -1884,6 +1901,16 @@ export interface SponsorModelItem {
   discount_rate?: number
   input_price?: number | null
   output_price?: number | null
+  /** 忙时折扣率 (timePricing 的 BUSY 档); 无忙闲时定价的模型为 null */
+  busy_discount_rate?: number | null
+  /** 闲时折扣率 (timePricing 的 OFF_PEAK 档) */
+  offpeak_discount_rate?: number | null
+  /** 闲时时段说明, 上游原文 (如 "00:00-09:00、12:00-14:00、18:00-00:00") */
+  offpeak_label?: string | null
+  /** 上游判定的当前时段: BUSY / OFF_PEAK */
+  current_band?: string | null
+  /** 当前时段对应的折扣率 */
+  current_discount_rate?: number | null
 }
 
 export interface SettingsState {
@@ -2255,7 +2282,7 @@ export interface SectorRotationUniverseItem {
   excluded?: boolean
 }
 
-/** 页面包元数据 — data/ext_pages/{id}/page.json, 后端源 app/services/ext_pages.py */
+/** 页面插件元数据 — data/ext_pages/{id}/page.json, 后端源 app/services/ext_pages.py */
 export interface RuntimePagePack {
   id: string
   enabled: boolean
@@ -2265,6 +2292,42 @@ export interface RuntimePagePack {
   sha256: string
   uploaded_at: number
   error: string
+}
+
+// ===== 升级保护 (二次开发) =====
+/** 报告文件分类: restorable=新版没动可恢复 / conflict=双方都改需手工合并 /
+ *  match=内容已一致 / added_lost=用户新建文件新版没有 */
+export type UpgradeGuardCategory = 'restorable' | 'conflict' | 'match' | 'added_lost'
+
+export interface UpgradeGuardReportFile {
+  relpath: string
+  category: UpgradeGuardCategory
+  current_exists: boolean
+}
+
+export interface UpgradeGuardReport {
+  id: string
+  from_version: string
+  to_version: string
+  created_at: string
+  counts: Record<UpgradeGuardCategory, number>
+  files: UpgradeGuardReportFile[]
+  dir: string
+}
+
+export interface UpgradeGuardStatus {
+  enabled: boolean
+  reason?: string
+  scanning?: boolean
+  program_root?: string
+  manifest_version?: string | null
+  current_version?: string
+  last_scan?: string
+  modified?: string[]
+  added?: string[]
+  backup_dir?: string
+  reports_dir?: string
+  pending_report?: UpgradeGuardReport | null
 }
 
 // ===== API surface =====
@@ -2324,6 +2387,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(ai),
     }),
+
+  upgradeGuardStatus: () => request<UpgradeGuardStatus>('/api/upgrade-guard/status'),
+  upgradeGuardScan: () => request<UpgradeGuardStatus>('/api/upgrade-guard/scan', { method: 'POST' }),
+  upgradeGuardRestore: (reportId: string, relpath: string) =>
+    request<{ ok: boolean; restored: string }>('/api/upgrade-guard/restore', {
+      method: 'POST',
+      body: JSON.stringify({ report_id: reportId, relpath }),
+    }),
+  upgradeGuardDismiss: () => request<{ ok: boolean }>('/api/upgrade-guard/dismiss-report', { method: 'POST' }),
 
   /** 赞助商(RunningHub)模型列表(后端代理, 规避其网关按 Origin 过滤) */
   sponsorModels: () =>
@@ -2933,7 +3005,7 @@ export const api = {
     const data = await request<{
       strategies: StrategyDetail[]
       load_errors?: StrategyLoadError[]
-      legacy_migration?: { seeded_signals?: number; archived_files?: string[] }
+      legacy_migration?: { seeded_signals?: number; seeded_strategies?: number; archived_files?: string[] }
     }>(
       `/api/strategies?${assetType ? `asset_type=${assetType}&` : ''}${timeframe !== 'all' ? `timeframe=${timeframe}` : ''}`,
     )
@@ -3382,7 +3454,7 @@ export const api = {
   analysisMenus: () =>
     request<{ items: AnalysisMenu[] }>('/api/analysis-menus'),
 
-  // ===== 页面包 (运行时扩展页面, 见 docs/page-sdk.md) =====
+  // ===== 页面插件 (运行时扩展页面, 见 docs/page-sdk.md) =====
   extPagesList: () =>
     request<RuntimePagePack[]>('/api/ext-pages'),
 
@@ -3469,12 +3541,24 @@ export const api = {
     ),
 
   extDataSchemaAll: () =>
-    request<{ items: { id: string; label: string; mode: string; columns: { name: string; type: string; label: string }[] }[] }>('/api/ext-data/schema-all'),
+    request<{ items: { id: string; label: string; mode: string; time_field?: string | null; columns: { name: string; type: string; label: string }[] }[] }>('/api/ext-data/schema-all'),
+
+  /** 日内多盘序列 (列表迷你图列): 每标的一天的 [HH:MM:SS, value] 点列 */
+  extDataSeries: (configId: string, field: string, date?: string | null, symbols?: string[]) =>
+    request<{ config_id: string; field: string; date: string | null; items: Record<string, [string, number][]> }>(
+      `/api/ext-data/${configId}/series?field=${encodeURIComponent(field)}`
+        + (date ? `&date=${date}` : '')
+        + (symbols?.length ? `&symbols=${encodeURIComponent(symbols.join(','))}` : ''),
+    ),
 
   extDataPullConfig: (id: string, body: {
     url: string; method?: string; headers?: Record<string, string>; body?: string;
     response_path?: string; field_map?: Record<string, string>;
     schedule_minutes?: number; enabled?: boolean;
+    schedule_time?: string | null;
+    schedule_period?: 'daily' | 'weekly' | 'monthly' | null;
+    schedule_day?: number | null;
+    schedule_trading_only?: boolean;
     time_window_start?: string | null; time_window_end?: string | null;
     date_param?: string | null;
     time_field?: string | null;
@@ -4329,6 +4413,14 @@ export interface PullConfig {
   field_map?: Record<string, string>
   schedule_minutes: number
   enabled: boolean
+  /** 每日固定拉取时刻 "HH:MM" (北京时间): 配置后忽略间隔, 每天该时刻拉一次; null=间隔制 */
+  schedule_time?: string | null
+  /** 固定时刻重复周期: daily=每天 | weekly=每周 | monthly=每月 (仅 schedule_time 生效) */
+  schedule_period?: 'daily' | 'weekly' | 'monthly' | null
+  /** weekly: 1=周一..7=周日; monthly: 1..31 (短月无该日则该月跳过) */
+  schedule_day?: number | null
+  /** 仅交易日: 跳过周六日 (节假日无法离线判定, 仍会按期尝试) */
+  schedule_trading_only?: boolean
   last_run?: string | null
   last_status?: string | null
   last_message?: string | null

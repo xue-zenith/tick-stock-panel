@@ -51,6 +51,54 @@ export interface ListColumnCustomizerProps {
 /** 判断扩展数据字段类型是否为数字(int/float/double/number/decimal 等)。
  * 旧列 source 无 fieldType 时默认 true(放宽), 让旧列也能配置数字格式 ——
  * 若列实际非数字, 渲染时 typeof val==='number' 判断会跳过格式化, 无副作用。 */
+/** 数字输入: 聚焦期间完全自由编辑 (随意清空/输入中间态), 失焦时统一收敛 —
+ *  合法数字钳制到 [min, max] 后提交; 空或非数字恢复聚焦前的数字。
+ *  受控父值在聚焦期间不干扰草稿, 避免逐位输入被即时钳制/回填打断。 */
+export function RangeNumberInput({
+  value, min, max, step, onCommit, className,
+}: {
+  value: number
+  min: number
+  max: number
+  step?: number
+  onCommit: (v: number) => void
+  className?: string
+}) {
+  const [draft, setDraft] = useState<string | null>(null)
+  // 同步 ref: onBlur 在 setState 之后触发, 闭包里的 draft 会过期
+  const draftRef = useRef<string | null>(null)
+  const setDraftBoth = (v: string | null) => {
+    draftRef.current = v
+    setDraft(v)
+  }
+
+  return (
+    <input
+      type="number" min={min} max={max} step={step}
+      value={draft ?? String(value)}
+      onFocus={() => setDraftBoth(String(value))}
+      onChange={e => setDraftBoth(e.target.value)}
+      onBlur={() => {
+        const raw = draftRef.current
+        setDraftBoth(null)
+        if (raw == null) return
+        const num = Number(raw)
+        // 空 / 非数字 → 不提交, 草稿清空后自动显示聚焦前的数字
+        if (raw.trim() === '' || !Number.isFinite(num)) return
+        onCommit(Math.max(min, Math.min(max, num)))
+      }}
+      onKeyDown={e => {
+        if (e.key === 'Enter') e.currentTarget.blur()
+        if (e.key === 'Escape') {
+          setDraftBoth(null)  // 丢弃草稿 → onBlur 读到 null, 恢复原值
+          e.currentTarget.blur()
+        }
+      }}
+      className={className}
+    />
+  )
+}
+
 function isNumericFieldType(ft?: string): boolean {
   if (!ft) return true
   const t = ft.toLowerCase()
@@ -169,6 +217,10 @@ export function ListColumnCustomizerInner({
   })
   const backdrop = useDialogBackdrop(onClose)
 
+  // 多盘表识别用 ref 镜像 (schema 查询数据), 让 addExtColumn 保持稳定引用
+  const extTablesRef = useRef<readonly { id: string; time_field?: string | null }[]>([])
+  extTablesRef.current = extSchema.data?.items ?? []
+
   // columns/onChange 用 ref 镜像，让下方多数 useCallback 空依赖（addExtColumn 例外，
   // 依赖 props.extColumnAlign）。callback 引用稳定后，columns 变更不再导致
   // SortableActiveCol 等子组件因 props 变化而无谓重渲染。
@@ -233,12 +285,20 @@ export function ListColumnCustomizerInner({
       toggleVisible(colId)
       return
     }
+    // 日内多盘表 (配置了时间列, 如集合竞价) 的数值列: 添加即默认分时式迷你图
+    // (与「分时」列同尺寸 150×80), 文字形态在列配置里按需切换
+    const multiSnapshot = !!extTablesRef.current.find(
+      t => t.id === configId && (t as { time_field?: string | null }).time_field,
+    )
     const newCol: ColumnConfig = {
       id: colId,
       source: { type: 'ext', configId, fieldName, fieldLabel, fieldType },
       label: fieldLabel || fieldName,
       visible: true,
-      align: extColumnAlign,
+      align: multiSnapshot && isNumericFieldType(fieldType) ? 'center' : extColumnAlign,
+      ...(multiSnapshot && isNumericFieldType(fieldType)
+        ? { extDisplay: { displayMode: 'text' as const, snapshotRender: 'line' as const, chartWidth: 150, chartHeight: 80 } }
+        : {}),
     }
     const actionIdx = cols.findIndex(c => c.id === 'builtin:action')
     if (actionIdx >= 0) {
@@ -450,6 +510,59 @@ export function ListColumnCustomizerInner({
               >竖向</button>
             </div>
           </label>
+        )}
+        {/* 日内多盘表 (配置了时间列, 如集合竞价): 选盘时刻 + 展示形态 */}
+        {col.source.type === 'ext' && (extTables.find(t => t.id === (col.source as { configId: string }).configId) as { time_field?: string | null } | undefined)?.time_field != null && (
+          <>
+            <div className="border-t border-border/40 pt-2 mt-1 text-[10px] text-muted">日内多盘</div>
+            <label className="flex items-center gap-2 text-xs">
+              <span className="text-secondary w-16 shrink-0">展示形态</span>
+              <select
+                value={col.extDisplay?.snapshotRender ?? 'text'}
+                onChange={e => updateExtDisplay(col.id, { snapshotRender: e.target.value as 'text' | 'bar' | 'line' })}
+                className="flex-1 h-7 rounded bg-elevated border border-border text-foreground text-xs px-2 focus:outline-none focus:border-accent/50"
+              >
+                <option value="line">折线图 (分时式)</option>
+                <option value="bar">柱状图 (逐盘幅度)</option>
+                <option value="text">文字 (选定时刻值)</option>
+              </select>
+            </label>
+            {(col.extDisplay?.snapshotRender ?? 'text') === 'text' ? (
+              <label className="flex items-center gap-2 text-xs">
+                <span className="text-secondary w-16 shrink-0">取盘时刻</span>
+                <input
+                  type="time"
+                  value={(col.extDisplay?.snapshotAt ?? '').slice(0, 5)}
+                  onChange={e => updateExtDisplay(col.id, { snapshotAt: e.target.value ? `${e.target.value}:00` : undefined })}
+                  title="取该时刻或之前最近一盘的值; 留空=末盘定型值"
+                  className="flex-1 h-7 rounded bg-elevated border border-border text-foreground text-xs px-2 focus:outline-none focus:border-accent/50"
+                />
+                <span className="text-[10px] text-muted shrink-0">留空=末盘</span>
+              </label>
+            ) : (
+              <div className="flex items-center gap-2 text-xs">
+                <label className="flex items-center gap-1">
+                  <span className="text-secondary shrink-0">宽</span>
+                  <RangeNumberInput
+                    value={col.extDisplay?.chartWidth ?? 150}
+                    min={60} max={300} step={10}
+                    onCommit={v => updateExtDisplay(col.id, { chartWidth: v })}
+                    className="w-16 h-7 rounded bg-elevated border border-border text-foreground text-xs px-2 text-center focus:outline-none focus:border-accent/50"
+                  />
+                </label>
+                <label className="flex items-center gap-1">
+                  <span className="text-secondary shrink-0">高</span>
+                  <RangeNumberInput
+                    value={col.extDisplay?.chartHeight ?? 80}
+                    min={24} max={160} step={4}
+                    onCommit={v => updateExtDisplay(col.id, { chartHeight: v })}
+                    className="w-16 h-7 rounded bg-elevated border border-border text-foreground text-xs px-2 text-center focus:outline-none focus:border-accent/50"
+                  />
+                </label>
+                <span className="text-[10px] text-muted">px · 当天全序列</span>
+              </div>
+            )}
+          </>
         )}
         {/* 数字格式化配置: 千分位 + 单位换算 + 小数位(仅 number 类型字段) */}
         {col.source.type === 'ext' && isNumericFieldType(col.source.fieldType) && (

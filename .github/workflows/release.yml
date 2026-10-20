@@ -18,7 +18,7 @@ on:
       version:
         description: '版本号 (如 v0.1.33, 用作 Release tag 和标题; 必须与 frontend/package.json 的 version 一致, 否则流水线直接失败)'
         required: true
-        default: 'v0.3.3'
+        default: 'v0.3.9'
       platforms:
         description: '要构建的平台 (逗号分隔: windows,macos,linux)'
         required: true
@@ -69,10 +69,18 @@ jobs:
           ver = '${{ github.event.inputs.version }}'.lstrip('v')  # v0.3.3 → 0.3.3
           all_platforms = json.loads('''$ALL''')
           selected = [p for p in all_platforms if p['platform'] in requested]
-          # 产物文件名带版本号 (TSP-Setup-x64-0.3.3.exe): 用户下载后一眼可辨版本
+          # 产物文件名带版本号 (TSP-Setup-x64-0.3.3.exe): 用户下载后一眼可辨版本。
+          # 按已知后缀插入版本号 — 不能用 rpartition('.') 拆扩展名:
+          # "TSP-linux-x64.tar.gz" 会拆成 stem=".tar" + ext="gz", 拼出
+          # "TSP-linux-x64.tar-0.3.9.gz", 与 latest.json 清单的通配格式不符。
           for p in selected:
-              stem, _, ext = p['artifact'].rpartition('.')
-              p['artifact'] = f'{stem}-{ver}.{ext}'
+              name = p['artifact']
+              for suffix in ('.tar.gz', '.dmg', '.exe'):
+                  if name.endswith(suffix):
+                      p['artifact'] = f'{name[:-len(suffix)]}-{ver}{suffix}'
+                      break
+              else:
+                  raise SystemExit(f'未知产物后缀: {name}')
           print('matrix=' + json.dumps({'include': selected}))
           with open('$GITHUB_OUTPUT', 'a') as f:
               f.write('matrix=' + json.dumps({'include': selected}) + '\n')
@@ -143,6 +151,19 @@ jobs:
         # 与 cwd 无关, 故 frontend/dist、tiers.yaml 等相对路径仍正确。
         working-directory: backend
         run: uv run pyinstaller ../packaging/tsp.spec --noconfirm
+
+      - name: 生成升级保护清单
+        # 二次开发升级对比基线: 对打包产出的 _internal 全量文件做 sha256。
+        # 相对路径与运行时 _MEIPASS 布局一致, 清单落 _internal/app/ 后随
+        # Inno/DMG/tar 一起分发, 运行时由 upgrade_guard 读取。
+        # uv run --no-project: 跨平台用 uv 管的 Python; 版本号唯一权威 =
+        # frontend/package.json (与 app/__init__._load_version 同源)。
+        # shell: bash —— Windows runner 默认是 pwsh, 不认识 FOO=$(...) 语法;
+        # 三平台 runner 均自带 bash, 显式指定即可统一。
+        shell: bash
+        run: |
+          APP_VER=$(node -p "require('./frontend/package.json').version")
+          uv run --no-project python scripts/generate_manifest.py --root backend/dist/TSP/_internal --output backend/dist/TSP/_internal/app/upgrade_manifest.json --version "$APP_VER"
 
       - name: 检查 Polars 兼容内核 (仅 Windows)
         if: matrix.platform == 'windows'
