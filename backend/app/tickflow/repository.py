@@ -614,13 +614,16 @@ class KlineRepository:
                 logger.info("enriched refresh skipped: latest parquet empty (%.2fs)", time.perf_counter() - started)
                 return
 
-            # Step 2: 读近 300 天 14 列数据 → compute → filter(latest) → 缓存
-            # 300 日历天 ≈ 210 交易日, 覆盖 filter_history 最大 lookback(90) + warmup(60)
+            # Step 2: 读近 700 天 14 列数据 → compute → filter(latest) → 缓存
+            # 700 日历天 ≈ 490 交易日, 覆盖 filter_history 最大 lookback(260) + warmup(60)
+            # 让 get_enriched_history 优先级 1 (repo 缓存) 对大窗口策略也能命中,
+            # 避免 _load_enriched_history 反复走慢路径 (cache miss → compute_indicators
+            # 全量重算 65 万行 ~1s CPU 满载)。
             try:
                 from datetime import timedelta
 
                 from app.indicators.pipeline import compute_enriched_history_window
-                start_full = latest - timedelta(days=300)
+                start_full = latest - timedelta(days=700)
                 read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
                                          "volume", "amount", "raw_close", "raw_high", "raw_low"]
                              if c in df_latest.columns]
@@ -1228,12 +1231,13 @@ class KlineRepository:
         if "date" not in cache.columns:
             return None
         cache_max = cache["date"].max()
-        cache_min = cache["date"].min()
-        from datetime import timedelta
-        # 验证缓存覆盖完整范围 (含 warmup)。lookback_days 是交易日语义, 用 ×2 日历日
-        # 放宽确保覆盖 (节假日/周末), 与 warmup 60 一起留足余量。
-        warmup_start = target_date - timedelta(days=(lookback_days + 60) * 2)
-        if cache_min > warmup_start or cache_max < target_date:
+        # 校验缓存覆盖 target_date (上限)。cache_min 一侧不严格 —— 启动时
+        # _refresh_enriched 已读尽磁盘可见数据 (compute_enriched_history_window
+        # 对整个 df_hist 计算完整指标含 EMA 收敛), 若磁盘数据起点晚于
+        # lookback_start, 慢路径 scan_parquet 读的是同一份磁盘数据, 结果相同,
+        # 走慢路径是纯浪费 (重算 65 万行 ~1s CPU)。下方交易日裁剪已处理数据
+        # 不足: len(trading_dates) <= lookback_days 时取 trading_dates[0] 回退。
+        if cache_max < target_date:
             return None
         # 按交易日计数裁剪: 从数据里实际存在的交易日序列取最后 lookback_days 个交易日。
         # 不能用 timedelta(days=N) (自然日), 否则周末/节假日会让窗口只有 ~N×5/7 个交易日,
