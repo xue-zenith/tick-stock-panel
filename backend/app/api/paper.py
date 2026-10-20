@@ -360,6 +360,8 @@ class AutoRuleModel(BaseModel):
     cooldown_days: int = 5
     max_positions: int = 0             # 最大同时持仓标的数, 0 不限 (对齐回测口径)
     enabled: bool = True
+    stop_loss_pct: float | None = None  # 风控: 负小数 (如 -0.07); None=回落策略 STOP_LOSS
+    max_hold_days: int | None = None    # 风控: 正整数; None=回落策略 MAX_HOLD_DAYS
 
 
 @router.get("/auto_rules")

@@ -942,19 +942,37 @@ def _placed_after_price_time(order: dict, day: str) -> bool:
     return ts.time() >= price_time
 
 
-def settle_day(data_dir: Path, day: str, account_id: str = DEFAULT_ACCOUNT_ID) -> dict:
+def settle_day(
+    data_dir: Path,
+    day: str,
+    account_id: str = DEFAULT_ACCOUNT_ID,
+    *,
+    strategy_engine=None,
+) -> dict:
     """盘后管道阶段: 撮合顺延单 → 除权调整 → 定版净值。幂等 (重跑同日安全)。
 
     撮合顺序: close 单用 raw_close; next_open 单用 raw_open; 仍 pending 的
     market 单 (当日无快照) 也按 raw_close 兜底成交 — 避免停牌外无限顺延。
     当日开盘后才下 / 排队的 next_open 单, 以及收盘后才下的 close / market 单,
     当日不成交也不计顺延, 留到下一交易日 (见 _placed_after_price_time)。
+
+    strategy_engine: 策略引擎 (可选)。传入时在撮合前执行风控平仓:
+    paper_auto.apply_risk_exits 按 auto_rule 的 stop_loss/max_hold_days
+    对 auto 仓位生成 close 卖单, 由下方既有撮合循环按 raw_close 成交。
+    缺省 None 时不跑风控 (向后兼容)。
     """
     summary = {"filled": 0, "expired": 0, "corp_actions": 0, "nav": None, "account": account_id}
     with PAPER_LOCK:
         acc = get_account(data_dir, account_id)
         if acc is None:
             return summary
+        # 风控平仓: 在 pending 撮合前生成 close 卖单, 同一 settle_day 内成交
+        if strategy_engine is not None:
+            try:
+                from app.strategy import paper_auto
+                paper_auto.apply_risk_exits(data_dir, day, account_id, strategy_engine)
+            except Exception as e:
+                logger.warning("paper risk_exits failed (soft): %s", e)
         pending_orders = sorted(
             (o for o in load_orders(data_dir, account_id) if o["status"] == "pending"),
             key=_order_sort_key,

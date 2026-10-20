@@ -727,8 +727,13 @@ def run_now(
         from app.strategy import paper as paper_trading
         # 逐账户结算 (账户间订单/台账隔离), 汇总合并供日志与结果展示
         totals = {"filled": 0, "expired": 0, "corp_actions": 0, "nav": None, "accounts": []}
+        # 策略引擎: 注入 settle_day 以启用风控平仓 (止损/到期)
+        strategy_engine = getattr(_get_app_state() or object(), "strategy_engine", None)
         for acc_id in paper_trading.list_account_ids(repo.store.data_dir):
-            s = paper_trading.settle_day(repo.store.data_dir, today.isoformat(), account_id=acc_id)
+            s = paper_trading.settle_day(
+                repo.store.data_dir, today.isoformat(),
+                account_id=acc_id, strategy_engine=strategy_engine,
+            )
             totals["filled"] += s.get("filled", 0)
             totals["expired"] += s.get("expired", 0)
             totals["corp_actions"] += s.get("corp_actions", 0)

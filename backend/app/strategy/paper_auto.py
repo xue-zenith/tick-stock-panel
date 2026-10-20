@@ -69,6 +69,16 @@ def validate_rule(rule: dict) -> None:
     max_positions = rule.get("max_positions", 0)
     if isinstance(max_positions, bool) or not isinstance(max_positions, int) or max_positions < 0:
         raise ValueError("max_positions 必须是非负整数 (0 = 不限制)")
+    # 风控字段 (可选): stop_loss_pct 负小数 (如 -0.07); max_hold_days 正整数。
+    # 两者均缺省时回落到策略 STOP_LOSS / MAX_HOLD_DAYS (仅 match_kind=strategy)。
+    sl = rule.get("stop_loss_pct")
+    if sl is not None and (isinstance(sl, bool) or not isinstance(sl, (int, float))):
+        raise ValueError("stop_loss_pct 必须是数值 (如 -0.07)")
+    if sl is not None and sl > 0:
+        raise ValueError("stop_loss_pct 应为负数或零 (如 -0.07)")
+    mhd = rule.get("max_hold_days")
+    if mhd is not None and (isinstance(mhd, bool) or not isinstance(mhd, int) or mhd < 1):
+        raise ValueError("max_hold_days 必须是正整数")
 
 
 def normalize_rule(rule: dict) -> dict:
@@ -87,6 +97,9 @@ def normalize_rule(rule: dict) -> dict:
     d.setdefault("max_positions", 0)   # 0 = 不限制 (对齐回测 max_positions 语义)
     d.setdefault("enabled", True)
     d.setdefault("created_at", _now_iso())
+    # 风控字段缺省 None (回落策略); 不做类型转换, 由 validate_rule 校验
+    d.setdefault("stop_loss_pct", None)
+    d.setdefault("max_hold_days", None)
     return d
 
 
@@ -300,3 +313,132 @@ def auto_order_events(created: list[dict], account_id: str = paper.DEFAULT_ACCOU
             "message": f"自动跟单触发{side_label}下单 ({type_label}) {o['qty']}股",
         })
     return events
+
+
+# ── 盘后风控平仓 (apply_risk_exits) ───────────────────────────
+
+
+def _resolve_risk_params(rule: dict, strategy_engine) -> tuple[float | None, int | None]:
+    """解析规则的风控参数: rule override 优先, 缺省回落策略值。
+    返回 (stop_loss, max_hold_days); None 表示该项不启用。"""
+    sl = rule.get("stop_loss_pct")
+    mhd = rule.get("max_hold_days")
+    if sl is None and mhd is None and rule.get("match_kind") == "strategy":
+        s = strategy_engine.get(rule["match_id"])
+        if s is not None:
+            sl = sl if sl is not None else s.stop_loss
+            mhd = mhd if mhd is not None else s.max_hold_days
+    if sl is not None:
+        sl = float(sl)
+    if mhd is not None:
+        mhd = int(mhd)
+    return sl, mhd
+
+
+def _count_trading_days(data_dir: Path, symbol: str, buy_date: str, end_day: str) -> int:
+    """统计 (buy_date, end_day] 区间内 symbol 的交易日数。
+
+    扫描 kline_daily 分区目录名 (Hive style `date=YYYY-MM-DD`)
+    —— 与是否复权/asset_type 无关, 只要该日有 K 落盘即算交易日。
+    不读 parquet 内容, 仅按目录名判断, 快且不加载。
+    """
+    daily_root = data_dir / "kline_daily"
+    if not daily_root.is_dir():
+        return 0
+    count = 0
+    for p in daily_root.iterdir():
+        if not p.is_dir():
+            continue
+        name = p.name
+        if not name.startswith("date="):
+            continue
+        d = name.removeprefix("date=")
+        if buy_date < d <= end_day:
+            count += 1
+    return count
+
+
+def apply_risk_exits(data_dir: Path, day: str, account_id: str, strategy_engine) -> list[dict]:
+    """盘后风控: 按 auto_rule 的 stop_loss/max_hold_days 对 auto 仓位生成 close 卖单。
+
+    只处理 source 以 'auto:' 开头的仓位。在 settle_day 撮合循环之前调用;
+    生成的 close 卖单会被同一次 settle_day 的既有撮合按 raw_close 成交,
+    复用全部费用/涨跌停/T+1/资金校验。返回生成的订单列表。
+
+    幂等: 已平仓的持仓 qty<=0 不再触发; qty>0 但当日已生成的 close 卖单
+    会占可卖额度 (create_order 的 pending_sell 检查), 不会重复生成超额。
+    """
+    created: list[dict] = []
+    positions = paper.load_positions(data_dir, account_id)
+    if not positions:
+        return created
+    rules = load_auto_rules(data_dir, account_id, enabled_only=True)
+    if not rules:
+        return created
+    # 持仓 → 最近一笔 auto 买入 order → rule_id
+    orders = paper.load_orders(data_dir, account_id)
+    auto_buy_by_symbol: dict[str, dict] = {}
+    for o in orders:
+        if o.get("side") != "buy" or o.get("status") != "filled":
+            continue
+        src = str(o.get("source", ""))
+        if not src.startswith("auto:"):
+            continue
+        sym = o.get("symbol")
+        if not sym:
+            continue
+        prev = auto_buy_by_symbol.get(sym)
+        if prev is None or str(prev.get("created_at", "")) < str(o.get("created_at", "")):
+            auto_buy_by_symbol[sym] = o
+    if not auto_buy_by_symbol:
+        return created
+    rules_by_id = {r["id"]: r for r in rules if r.get("id")}
+    for symbol, pos in positions.items():
+        if pos["qty"] <= 0:
+            continue
+        order = auto_buy_by_symbol.get(symbol)
+        if order is None:
+            continue  # manual 仓位不归 auto 规则管
+        rule_id = str(order.get("source", "")).removeprefix("auto:")
+        rule = rules_by_id.get(rule_id)
+        if rule is None:
+            continue  # 规则已删除
+        try:
+            sl, mhd = _resolve_risk_params(rule, strategy_engine)
+        except (ValueError, AttributeError, TypeError) as e:
+            logger.warning("paper risk resolve failed %s: %s", symbol, e)
+            continue
+        if sl is None and mhd is None:
+            continue  # 无风控约束
+        bar = paper.read_daily_bar(data_dir, symbol, pos.get("asset_type", "stock"), day) or {}
+        close = bar.get("close")
+        trigger_reason = None
+        if sl is not None and sl < 0 and close is not None and float(pos["avg_cost"]) > 0:
+            pnl = (float(close) - float(pos["avg_cost"])) / float(pos["avg_cost"])
+            if pnl <= -abs(sl):
+                trigger_reason = f"止损 (pnl={pnl:.2%}, 阈值 {sl:.2%})"
+        if trigger_reason is None and mhd is not None:
+            buy_date = max(lot["date"] for lot in pos["lots"] if lot.get("date"))
+            trading_days = _count_trading_days(data_dir, symbol, buy_date, day)
+            if trading_days >= mhd:
+                trigger_reason = f"到期 (持有 {trading_days} 交易日, 阈值 {mhd})"
+        if trigger_reason is None:
+            continue
+        available = paper._available_of(pos, day)
+        if available <= 0:
+            logger.info("paper risk %s: %s 触发%s 但当日买入无可卖, 跳过", rule["name"], symbol, trigger_reason)
+            continue
+        o, err = paper.create_order(
+            data_dir, symbol, "sell",
+            account_id=account_id,
+            qty=available,
+            order_type="close",
+            ref_price=float(pos["avg_cost"]),
+            source=f"auto_risk:{rule_id}",
+        )
+        if err:
+            logger.info("paper risk %s: %s 风控平仓被拒: %s", rule["name"], symbol, err)
+            continue
+        created.append(o)
+        logger.info("paper risk %s: %s 触发%s 平仓 %d 股", rule["name"], symbol, trigger_reason, available)
+    return created
