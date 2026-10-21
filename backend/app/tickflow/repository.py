@@ -1272,24 +1272,28 @@ class KlineRepository:
         if "date" not in cache.columns:
             return None
         cache_max = cache["date"].max()
-        # 校验缓存覆盖 target_date (上限)。cache_min 一侧不严格 —— 启动时
-        # _refresh_enriched 已读尽磁盘可见数据 (compute_enriched_history_window
-        # 对整个 df_hist 计算完整指标含 EMA 收敛), 若磁盘数据起点晚于
-        # lookback_start, 慢路径 scan_parquet 读的是同一份磁盘数据, 结果相同,
-        # 走慢路径是纯浪费 (重算 65 万行 ~1s CPU)。下方交易日裁剪已处理数据
-        # 不足: len(trading_dates) <= lookback_days 时取 trading_dates[0] 回退。
-        if cache_max < target_date:
-            return None
+        # cache_min 一侧不严格 —— 启动时 _refresh_enriched 已读尽磁盘可见数据
+        # (compute_enriched_history_window 对整个 df_hist 计算完整指标含 EMA
+        # 收敛), 若磁盘数据起点晚于 lookback_start, 慢路径 scan_parquet 读的是
+        # 同一份磁盘数据, 结果相同, 走慢路径是纯浪费 (重算 65 万行 ~1s CPU)。
+        # 下方交易日裁剪已处理数据不足: len(trading_dates) <= lookback_days 时
+        # 取 trading_dates[0] 回退。
+        #
+        # target_date 上限: 盘中 target_date 是今天, 但磁盘最新 enriched 数据
+        # 可能还是昨天 (今日实时行情通过 live_agg 递推, 不在历史缓存里)。
+        # 若 target_date > cache_max, 用 cache_max 作为有效 target_date 裁剪 ——
+        # 慢路径 scan_parquet 读的也是同一份磁盘数据 (到 cache_max), 走慢路径
+        # 是纯浪费。策略拿历史窗口 + 实时 df 拼接即可, 不依赖历史缓存里的今日行。
+        effective_target = target_date if target_date <= cache_max else cache_max
         # 按交易日计数裁剪: 从数据里实际存在的交易日序列取最后 lookback_days 个交易日。
         # 不能用 timedelta(days=N) (自然日), 否则周末/节假日会让窗口只有 ~N×5/7 个交易日,
         # 导致 filter_history 策略的滚动窗口/行号差(_gap)漏算, 与回测结果不一致。
-        # 只数目标日及之前的交易日: 历史日期运行策略时缓存里还有更晚的交易日
-        trading_dates = cache["date"].filter(cache["date"] <= target_date).unique().sort()
+        trading_dates = cache["date"].filter(cache["date"] <= effective_target).unique().sort()
         if len(trading_dates) > lookback_days:
             lookback_start = trading_dates[-(lookback_days + 1)]
         else:
             lookback_start = trading_dates[0]
-        return cache.filter((pl.col("date") >= lookback_start) & (pl.col("date") <= target_date))
+        return cache.filter((pl.col("date") >= lookback_start) & (pl.col("date") <= effective_target))
 
     def get_enriched_range(
         self,
