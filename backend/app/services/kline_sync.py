@@ -18,6 +18,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from concurrent.futures import ThreadPoolExecutor
+
 import polars as pl
 
 from app.data_providers.base import AssetType
@@ -26,7 +28,7 @@ from app.market_time import CN_TZ, cn_now, cn_today
 from app.services import minute_adjust, preferences
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
-from app.tickflow.rate_limits import chunked, resolve_limit, sleep_between_batches
+from app.tickflow.rate_limits import chunked, reserve_and_wait, resolve_limit, sleep_between_batches
 from app.tickflow.repository import KlineRepository, replace_with_retry
 
 logger = logging.getLogger(__name__)
@@ -220,21 +222,28 @@ def sync_daily_batch(symbols: list[str],
                      end_time: datetime | None = None,
                      on_chunk_done: Callable[[int, int], None] | None = None,
                      failed_out: list[str] | None = None) -> pl.DataFrame:
-    """批量拉取多股日 K。
+    """批量拉取多股日 K — 令牌桶门控的并发版本。
 
     优先使用 start_time / end_time 区间 + count=10000,确保覆盖完整时间段。
     仅传 count 时按条数回溯。
 
+    分块通过 ThreadPoolExecutor 并发派发, SDK 发包由进程级令牌桶
+    (reserve_and_wait) 按 60/rpm 间隔逐个放行 —— N 个 worker 同时存活,
+    但实际请求被串行化在共享时间轴上, 不超 rpm。rpm=None 时无门控全并发。
+
     failed_out: 可选出参。拉取失败的分块标的会追加进该 list, 供上层判定「部分失败」
                 而非静默当成功(某分块断网 → 这些标的本轮未更新, 保持旧数据)。
     """
-    tf = get_client()
-    out: list[pl.DataFrame] = []
-    chunks = chunked(symbols, batch_size)
-    failed_syms: list[str] = []
+    if not symbols:
+        return pl.DataFrame()
 
-    for i, chunk in enumerate(chunks):
-        sleep_between_batches(i, rpm)
+    tf = get_client()
+    chunks = chunked(symbols, batch_size)
+    total = len(chunks)
+
+    def _fetch(chunk: list[str]) -> tuple[pl.DataFrame | None, Exception | None]:
+        # 令牌桶门控: N worker 并发存活, SDK 调用按 60/rpm 串行放行。
+        reserve_and_wait(rpm)
         try:
             if start_time and end_time:
                 raw = _sdk_call_with_deadline(lambda: tf.klines.batch(
@@ -248,31 +257,40 @@ def sync_daily_batch(symbols: list[str],
                 raw = _sdk_call_with_deadline(lambda: tf.klines.batch(
                     chunk, period="1d", count=count or 250, adjust="none",
                     as_dataframe=False, show_progress=False))
+            # False 直转: timestamp(UTC 毫秒) → 北京墙钟 datetime 列,
+            # _normalize_daily 将 datetime 映射为 date — 与 SDK True 路径的
+            # trade_date 字符串列同口径 (fromtimestamp(ts/1000, Asia/Shanghai))。
+            seg = _compact_klines_to_df(raw)
+            if not seg.is_empty():
+                seg = seg.with_columns(_timestamp_to_beijing_datetime(pl.col("timestamp")).alias("datetime")).drop("timestamp")
+                return (_normalize_daily(seg), None)
+            return (None, None)
         except SDKCallTimeoutError as e:
-            logger.warning("batch fetch timed out for %d symbols (chunk %d/%d): %s",
-                           len(chunk), i + 1, len(chunks), e)
-            failed_syms.extend(chunk)
+            return (None, e)
+        except Exception as e:  # noqa: BLE001 — JobCancelledError 是 BaseException 不会被吞
+            return (None, e)
+
+    out: list[pl.DataFrame] = []
+    failed_syms: list[str] = []
+    workers = min(total, 32)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        # pool.map 按提交顺序产出 → 第 i 个 yield 必对应 chunks[i]。
+        # 主线程按序号发心跳 → 严格单调 [1, 2, ..., total] (与旧串行版一致,
+        # 现有测试无需改)。取消信号: on_chunk_done 抛 JobCancelledError
+        # (BaseException) → 跳出 with 块 → pool.shutdown(wait=True)
+        # 等 in-flight worker 跑完当前 _sdk_call_with_deadline (≤600s) → 上抛。
+        for i, (seg, err) in enumerate(pool.map(_fetch, chunks)):
+            if err is not None:
+                logger.warning("batch fetch failed for %d symbols (chunk %d/%d): %s",
+                               len(chunks[i]), i + 1, total, err)
+                failed_syms.extend(chunks[i])
+            elif seg is not None:
+                out.append(seg)
             if on_chunk_done:
                 # 心跳: 分块失败也推进进度/取消检查点, 防持续超时的同步
                 # 长时间无上报(reap 误判)且协作取消无边界可退出。
-                on_chunk_done(i + 1, len(chunks))
-            continue
-        except Exception as e:  # noqa: BLE001
-            logger.warning("batch fetch failed for %d symbols (chunk %d/%d): %s",
-                           len(chunk), i + 1, len(chunks), e)
-            failed_syms.extend(chunk)
-            continue
-
-        # False 直转: timestamp(UTC 毫秒) → 北京墙钟 datetime 列,
-        # _normalize_daily 将 datetime 映射为 date — 与 SDK True 路径的
-        # trade_date 字符串列同口径 (fromtimestamp(ts/1000, Asia/Shanghai))。
-        seg = _compact_klines_to_df(raw)
-        if not seg.is_empty():
-            seg = seg.with_columns(_timestamp_to_beijing_datetime(pl.col("timestamp")).alias("datetime")).drop("timestamp")
-            out.append(_normalize_daily(seg))
-
-        if on_chunk_done:
-            on_chunk_done(i + 1, len(chunks))
+                on_chunk_done(i + 1, total)
 
     # 部分失败可见化: 聚合一条 WARNING(而非只有逐块 debug/warning), 并回传出参。
     if failed_syms:
@@ -1291,8 +1309,6 @@ def fetch_intraday_full_market_burst(
     chunks = list(chunked(symbols, batch_size))
     if not chunks:
         return (pl.DataFrame(), 0)
-
-    from concurrent.futures import ThreadPoolExecutor
 
     tf = get_client()
 

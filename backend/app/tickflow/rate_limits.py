@@ -119,6 +119,25 @@ def sleep_between_batches(index: int, rpm: int | None, *, default_interval: floa
         time.sleep(wait)
 
 
+def reserve_and_wait(rpm: int | None, *, default_interval: float = 0.0) -> float:
+    """为一次并发请求预约一个发包槽并阻塞等待到槽时间。
+
+    与 ``sleep_between_batches`` 的区别: 后者按 index 调度, index==0 不 sleep,
+    多个并发调用方同时以 index==0 启动会瞬时突发超过单能力 rpm。本函数不依赖
+    index, 直接对共享时间轴排队, 适合从多个工作线程并发调用 —— N 个 worker 可
+    同时存活, 但实际 SDK 发包被令牌桶按 60/rpm 间隔逐个放行。
+
+    Returns: 实际等待的秒数 (>=0)。持锁仅做时间账目, 不在锁内 sleep。
+    """
+    interval = batch_interval(rpm, default=default_interval)
+    if interval <= 0:
+        return 0.0
+    wait = _reserve_slot(rpm or -1, interval)
+    if wait > 0:
+        time.sleep(wait)
+    return wait
+
+
 def min_batch(preferred: int, limit: ResolvedLimit) -> int:
     """Clamp a user-preferred batch size by a resolved capability batch limit."""
     return min(preferred, limit.batch) if limit.batch else preferred
