@@ -304,6 +304,25 @@
 | 回测           | 子进程隔离不卡主服务,刷新重连不丢任务                             | spawn worker + 持久 run ID + 重活并发闸        |
 | 部署与兼容     | 单容器**零外部数据库**(Parquet + DuckDB 文件型) · 新老 CPU 双内核 | polars rtcompat 兼容内核,运行时自动探测        |
 
+### Enriched 历史缓存优化
+
+`get_enriched_history` 是声明 `filter_history` 的策略(如反包、均线回踩)在实时监控和
+选股扫描里的热点路径。三级缓存命中时 ~0ms,miss 时走 `compute_indicators` 慢路径重算
+65 万行(~1s CPU 满载),盘中每轮行情刷新触发一次 → 后端 CPU 长期 100%。
+
+**根因与修复**(2026-10 验证,盘中 cache miss 8 条 → 0,单次 680ms → 4.5ms):
+
+| 问题 | 根因 | 修复 |
+| :--- | :--- | :--- |
+| 大 lookback 策略永远 miss | 旧校验 `(lookback+60)*2` 要求 cache_min 早于磁盘最早数据 | 去掉多余 warmup 预留,仅按 lookback_days 裁剪 |
+| 启动预读范围不足 | 300 日历天 ≈ 210 交易日,不够 lookback 260 + warmup 60 | 扩大到 700 日历天,读尽磁盘可见数据 |
+| 盘中 target_date 超过 cache_max | 磁盘最新 enriched 是昨天,但 target_date 是今天 | `effective_target = min(target_date, cache_max)`,策略拿历史窗口 + 实时 df 拼接 |
+| 启动 warmup 与 quote commit 撞车 | 世代漂移导致缓存丢弃后不重建(GH #480) | 后台 warmup 线程有界重试(上游 `95e1519`) |
+
+**关键设计**:慢路径 `scan_parquet` 读的是**同一份磁盘数据**(到 cache_max),
+走慢路径是纯浪费 —— 重算得到相同结果。只要缓存里有"磁盘上实际存在的全部交易日",
+就应直接返回裁剪后的缓存,而非 miss 重算。
+
 > 开放层的性能(网关裁决 O(1)、契约快照守护、亚秒级事件推送等)见下方[开放能力](#-开放能力open-api--mcp)章节。
 
 | 能力         | 表现                               | 靠什么                                       |
