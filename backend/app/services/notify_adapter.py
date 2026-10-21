@@ -5,7 +5,7 @@
 
 平台实现:
   - Windows: winotify (进现代操作中心, 支持图标)
-  - macOS:   osascript (系统已内置, 无需额外依赖)
+  - macOS:   terminal-notifier (优先, 通知标题/分组更清晰) → osascript 兜底
   - Linux:   notify-send (系统已内置) / plyer 兜底
 
 设计: 失败静默降级, 绝不因通知失败阻断告警主流程 (落盘 / SSE 推送)。
@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +26,9 @@ _MAX_LEN = 200
 
 # 避免重复探测平台能力, 缓存一次
 _backend_cache: str | None = None
+
+# macOS 通知应用名 (terminal-notifier 的 -sender 已不支持, 但 title 统一品牌)
+_APP_TITLE = "TickFlow"
 
 
 def _detect_backend() -> str | None:
@@ -43,7 +47,12 @@ def _detect_backend() -> str | None:
             logger.debug("winotify 不可用, Windows 通知降级")
             backend = None
     elif sys.platform == "darwin":
-        backend = "osascript"
+        # 优先 terminal-notifier (标题/分组更清晰), 不可用则 osascript 兜底。
+        # terminal-notifier 需在系统设置 → 通知里授权, 未授权时自动降级。
+        if shutil.which("terminal-notifier"):
+            backend = "terminal-notifier"
+        else:
+            backend = "osascript"
     elif sys.platform.startswith("linux"):
         backend = "notify-send"
 
@@ -81,6 +90,8 @@ def notify(title: str, message: str, icon: Path | None = None) -> bool:
     try:
         if backend == "winotify":
             return _notify_winotify(title, message)
+        if backend == "terminal-notifier":
+            return _notify_terminal_notifier(title, message)
         if backend == "osascript":
             return _notify_osascript(title, message)
         if backend == "notify-send":
@@ -106,10 +117,42 @@ def _notify_winotify(title: str, message: str) -> bool:
     return True
 
 
+def _notify_terminal_notifier(title: str, message: str) -> bool:
+    """macOS 通知 (terminal-notifier) — 优先使用, 标题/分组更清晰。
+
+    terminal-notifier 的 -sender 在新版 macOS 已不支持, 通知归属仍为
+    "terminal-notifier" (比 osascript 的"脚本编辑器"更直观)。需在系统
+    设置 → 通知里授权; 未授权时返回 False, 由上层回退到 osascript。
+    """
+    result = subprocess.run(  # noqa: S603, S607
+        [
+            "terminal-notifier",
+            "-title", f"{_APP_TITLE} · {title}",
+            "-message", message,
+            "-sound", "default",
+            # 按标题分组, 避免同源通知刷屏
+            "-group", title[:50],
+        ],
+        capture_output=True,
+        timeout=5,
+    )
+    if result.returncode != 0:
+        # 未授权或通知被禁: 降级到 osascript
+        logger.debug("terminal-notifier 失败, 降级 osascript: %s",
+                     result.stderr.decode("utf-8", "ignore")[:100])
+        _backend_cache = "osascript"
+        return _notify_osascript(title, message)
+    return True
+
+
 def _notify_osascript(title: str, message: str) -> bool:
-    """macOS 通知 (osascript) — 调用系统 AppleScript。"""
+    """macOS 通知 (osascript) — 调用系统 AppleScript。
+
+    通知归属显示为"脚本编辑器" (macOS 把 osascript 发出的通知归到此应用),
+    无法更改; 但标题统一带 TickFlow 前缀便于辨识。
+    """
     # 转义双引号, 避免 AppleScript 注入
-    safe_title = title.replace('"', '\\"')
+    safe_title = f'{_APP_TITLE} · {title}'.replace('"', '\\"')
     safe_msg = message.replace('"', '\\"')
     script = (
         f'display notification "{safe_msg}" with title "{safe_title}"'
@@ -124,7 +167,7 @@ def _notify_osascript(title: str, message: str) -> bool:
 
 def _notify_notify_send(title: str, message: str, icon: Path | None) -> bool:
     """Linux 通知 (notify-send) — freedesktop.org 标准。"""
-    args = ["notify-send", title]
+    args = ["notify-send", f"{_APP_TITLE} · {title}"]
     if icon and Path(icon).exists():
         args.extend(["--icon", str(icon)])
     args.append(message)
