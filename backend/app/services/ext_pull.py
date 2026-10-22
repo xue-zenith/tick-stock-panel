@@ -371,7 +371,8 @@ async def fetch_and_ingest(
     rows = await fetch_rows_for_date(config, day)
     if not rows:
         raise ValueError("提取到的行数为 0")
-    n = rows_to_parquet(
+    n = await asyncio.to_thread(
+        rows_to_parquet,
         rows, config, data_dir, snapshot_date=day,
         keep_strategy_cache=keep_strategy_cache,
     )
@@ -450,7 +451,9 @@ async def _backfill_history(
             if not rows:
                 empty += 1  # 该日无数据 (服务端未归档), 不是错误
             else:
-                rows_written += rows_to_parquet(rows, config, data_dir, snapshot_date=d)
+                rows_written += await asyncio.to_thread(
+                    rows_to_parquet, rows, config, data_dir, snapshot_date=d
+                )
                 fetched += 1
         except httpx.HTTPStatusError as e:
             if _status_code(e) == 404:
@@ -475,7 +478,9 @@ async def _backfill_history(
                     if not rows:
                         empty += 1
                     else:
-                        rows_written += rows_to_parquet(rows, config, data_dir, snapshot_date=d)
+                        rows_written += await asyncio.to_thread(
+                            rows_to_parquet, rows, config, data_dir, snapshot_date=d
+                        )
                         fetched += 1
                 except Exception as e2:
                     if _status_code(e2) == 404:  # 退避重试后无该日快照 → 同样视为无数据
@@ -710,11 +715,12 @@ class PullScheduler:
     async def _run_loop(self, config: ExtConfig) -> None:
         """单个配置的定时拉取循环。
 
-        策略: 启用后立即执行一次, 之后按 interval 循环。
+        策略: 启用后执行一次 (重启安全: 当天已成功拉过则跳过), 之后按 interval 循环。
         每次循环重读最新配置 (fresh), interval 取自 fresh.pull.schedule_minutes,
         这样用户中途修改间隔也能立即生效 (无需重启)。
         配置了 schedule_time (每日固定时刻) 时走 _run_daily_at 墙钟对齐。
         """
+        _first_iteration = True
         try:
             while self._running:
                 # 每轮重读最新配置 — 用户可能修改了 url / interval / enabled
@@ -739,8 +745,25 @@ class PullScheduler:
                     await asyncio.sleep(interval)
                     continue
 
-                # 先执行一次 (启用即拉取, 让用户立刻看到生效)
-                await self._execute_pull(fresh, store)
+                # 首次进入: 延迟 30s 让行情轮询线程先稳定运行几轮, 避免 ext 拉取
+                # 的 HTTP fanout 与 enriched 预热 + 首轮行情抢 CPU/GIL。
+                # 仅间隔制首次进入; 后续循环不受影响。
+                if _first_iteration:
+                    _first_iteration = False
+                    await asyncio.sleep(30)
+
+                # 启动安全: 间隔制也跳过「当天已成功拉过」的重启场景, 与固定时刻制
+                # (_ran_at_or_after) 同口径。首次启用 (last_run=None) 仍立即拉取;
+                # 上次失败 (last_status != success) 也重试, 不跳过。
+                now = cn_now()
+                if (
+                    pull.last_run
+                    and pull.last_status == "success"
+                    and _ran_at_or_after(pull, now.replace(hour=0, minute=0, second=0, microsecond=0))
+                ):
+                    logger.info("PullScheduler: %s skipped (already pulled today)", config.id)
+                else:
+                    await self._execute_pull(fresh, store)
 
                 # 间隔取自最新配置 (每次重新读取, 修复改间隔不生效)
                 interval = max(pull.schedule_minutes * 60, 60)  # 至少 60s

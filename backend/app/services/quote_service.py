@@ -1835,6 +1835,20 @@ class QuoteService:
 
             # ---- 尝试增量路径 ----
             live_agg = self._repo.get_live_agg() if asset_type == "stock" else pl.DataFrame()
+
+            # 预热期间 live_agg 为空: 跳过本轮 enriched 计算, 避免每轮行情都做
+            # 1M+ 行全量重算。预热完成后 live_agg 就绪, 后续轮次自动走增量路径。
+            # 仅股票资产受影响 (ETF/指数走各自缓存, 不依赖 live_agg)。
+            if asset_type == "stock" and live_agg.is_empty():
+                if self._repo._enriched_warming:
+                    logger.debug("enriched 预热中, 跳过本轮 live enriched 计算")
+                    return
+                # 预热已结束但 live_agg 仍为 None (预热失败降级): 不在轮询线程
+                # 做 50s+ 同步重算, 跳过本轮; 下一轮预热重试或手动刷新会恢复。
+                if self._repo._live_agg_cache is None:
+                    logger.warning("live_agg 缓存为空 (预热失败?), 跳过本轮 enriched 计算")
+                    return
+
             prev_enriched, prev_date = (
                 self._repo.get_enriched_latest()
                 if asset_type == "stock"

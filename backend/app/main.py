@@ -62,10 +62,22 @@ from app.tickflow import client as tf_client
 from app.tickflow.policy import detect_capabilities
 from app.tickflow.repository import DataStore, KlineRepository
 
-logging.basicConfig(
-    level=settings.log_level,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+# 幂等日志配置: 清掉前次 import 可能已添加的 handler, 再统一配置 root。
+# 注意: uvicorn 的 LOGGING_CONFIG 在 app.main 被 import 之后才执行, 会给
+# uvicorn/uvicorn.error/uvicorn.access 子 logger 配自己的 StreamHandler。
+# 因此 uvicorn handler 的清理放到 _application_lifespan 里 (lifespan 在
+# uvicorn 配完后才执行), 此处只配 root。
+_root = logging.getLogger()
+for _h in list(_root.handlers):
+    _root.removeHandler(_h)
+
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(
+    logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 )
+_root.addHandler(_stream_handler)
+_root.setLevel(settings.log_level)
+
 logger = logging.getLogger(__name__)
 
 # 追加文件日志: uvicorn (含 --reload 开发模式) 默认只有 StreamHandler, 同步/管道等
@@ -86,13 +98,39 @@ if not getattr(sys, "frozen", False):
         _file_handler.setFormatter(
             logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
         )
-        logging.getLogger().addHandler(_file_handler)
+        _root.addHandler(_file_handler)
     except Exception as _e:  # noqa: BLE001
         logger.warning("文件日志初始化失败, 仅输出到终端: %s", _e)
 
 
 @asynccontextmanager
 async def _application_lifespan(app: FastAPI):
+    # uvicorn 的 LOGGING_CONFIG 在 app import 后执行, 给 root 和 uvicorn/uvicorn.error/
+    # uvicorn.access 子 logger 各配了 StreamHandler。lifespan 在 uvicorn 配完后才执行,
+    # 此时: (1) 清掉 uvicorn 子 logger 的自有 handler, 让记录传播到 root;
+    # (2) 清掉 root 被 uvicorn dictConfig 追加的重复 handler, 只保留我们在模块级配的
+    # StreamHandler + RotatingFileHandler。消除每条日志双写。
+    for _name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        _uv = logging.getLogger(_name)
+        _uv.handlers.clear()
+        _uv.propagate = True
+
+    # root: 保留模块级配的 StreamHandler + RotatingFileHandler (它们有 formatter),
+    # 清掉 uvicorn dictConfig 追加的无 formatter handler。
+    _root = logging.getLogger()
+    _keep = []
+    for _h in _root.handlers:
+        # 模块级 handler 有 formatter; uvicorn 追加的没有
+        if _h.formatter is not None:
+            _keep.append(_h)
+        else:
+            _root.removeHandler(_h)
+    # 如果全清光了 (异常路径), 兜底加一个 StreamHandler
+    if not _keep:
+        _sh = logging.StreamHandler()
+        _sh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        _root.addHandler(_sh)
+
     logger.info(
         "Tick Stock Panel v%s starting (mode=%s)",
         __version__, tf_client.current_mode(),
