@@ -1110,6 +1110,130 @@ export interface PaperAccount {
   created_at: string
 }
 
+// ===== 实盘交易 (与模拟盘严格隔离; 后端 app/trading 域模块) =====
+export interface LiveAccount {
+  account_id: string
+  broker: string
+  display_name: string
+  mode: 'disarmed' | 'armed_manual' | 'armed_auto' | 'degraded' | 'halted'
+  created_at: string
+}
+
+export interface LiveAccountSnapshot {
+  account_id: string
+  as_of: string
+  cash: number
+  frozen_cash: number
+  market_value: number
+  total: number
+  nav: number
+  mode: string
+}
+
+export interface LivePosition {
+  account_id: string
+  symbol: string
+  qty: number
+  available_qty: number
+  avg_cost: number
+  last_price: number | null
+  market_value: number
+  pnl: number
+  as_of: string
+}
+
+export interface LiveOrder {
+  order_id: string
+  broker_order_id: string | null
+  account_id: string
+  intent_id: string
+  symbol: string
+  side: 'buy' | 'sell'
+  qty: number
+  price_policy: string
+  limit_price: number | null
+  state: string
+  filled_qty: number
+  avg_fill_price: number | null
+  submitted_at: string | null
+  last_update_at: string
+  reject_reason: string | null
+}
+
+export interface LiveOrderEvent {
+  event_id: string
+  order_id: string
+  from_state: string | null
+  to_state: string
+  reason: string | null
+  ts: string
+}
+
+export interface LiveIntentInput {
+  account_id: string
+  symbol: string
+  side: 'buy' | 'sell'
+  qty: number
+  price_policy?: 'limit' | 'market' | 'next_open' | 'close'
+  limit_price?: number | null
+  tif?: string
+  source?: 'manual' | 'ai_l1'
+  strategy_id?: string | null
+  rationale?: string
+  dedupe_key?: string | null
+}
+
+export interface LiveApprovalRow {
+  intent_id: string
+  approval_id: string
+  account_id: string
+  symbol: string
+  side: string
+  qty: number
+  price_policy: string
+  limit_price: number | null
+  source: string
+  rationale: string | null
+  expires_at: string
+}
+
+export interface LiveReconRun {
+  run_id: string
+  account_id: string
+  started_at: string
+  finished_at: string | null
+  status: 'running' | 'clean' | 'dirty'
+  diff_count: number
+}
+
+export interface LiveReconDiff {
+  diff_id: string
+  run_id: string
+  order_id: string | null
+  diff_kind: string
+  local_value: string | null
+  broker_value: string | null
+  resolved: number
+  resolved_at: string | null
+}
+
+export interface LiveSystemEvent {
+  event_id: string
+  kind: string
+  detail: string
+  ts: string
+}
+
+export interface LiveAutonomyGrant {
+  grant_id: string
+  strategy_id: string
+  level: number
+  max_order_value: number
+  enabled: number
+  created_at: string
+  revoked_at: string | null
+}
+
 export interface PaperAccountSummary {
   id: string
   name: string
@@ -4280,6 +4404,94 @@ export const api = {
       timeoutMs: null,
       body: JSON.stringify(payload),
     }),
+
+  // ===== 实盘交易 (与模拟盘隔离; 后端 /api/live/* 端点) =====
+  liveAccounts: () =>
+    request<{ accounts: LiveAccount[] }>('/api/live/accounts'),
+
+  liveCreateAccount: (body: { account_id: string; broker?: string; display_name?: string }) =>
+    request<{ account: LiveAccount }>('/api/live/accounts', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  liveAccountDetail: (accountId: string) =>
+    request<{ account: LiveAccount; snapshot: LiveAccountSnapshot | null; positions: LivePosition[] }>(
+      `/api/live/accounts/${encodeURIComponent(accountId)}`,
+    ),
+
+  liveOrders: (status?: string, account?: string) => {
+    const q = new URLSearchParams()
+    if (status) q.set('status', status)
+    if (account) q.set('account', account)
+    return request<{ orders: LiveOrder[] }>(`/api/live/orders${q.toString() ? `?${q}` : ''}`)
+  },
+
+  liveSubmitOrder: (body: LiveIntentInput) =>
+    request<{ intent_id: string; status: string; dedupe_key: string; verdict?: string; reasons?: string[]; duplicate?: boolean }>(
+      '/api/live/orders', { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  liveCancelOrder: (id: string) =>
+    request<{ order_id: string; state: string; already_terminal?: boolean }>(
+      `/api/live/orders/${encodeURIComponent(id)}`, { method: 'DELETE' },
+    ),
+
+  liveOrderEvents: (id: string) =>
+    request<{ events: LiveOrderEvent[] }>(`/api/live/orders/${encodeURIComponent(id)}/events`),
+
+  liveApprovals: () =>
+    request<{ approvals: LiveApprovalRow[] }>('/api/live/approvals'),
+
+  liveApprove: (id: string) =>
+    request<{ order_id: string; approval_id: string; state: string }>(
+      `/api/live/approvals/${encodeURIComponent(id)}/approve`, { method: 'POST' },
+    ),
+
+  liveReject: (id: string) =>
+    request<{ intent_id: string; status: string }>(
+      `/api/live/approvals/${encodeURIComponent(id)}/reject`, { method: 'POST' },
+    ),
+
+  liveHealth: (account?: string) =>
+    request<{ accounts?: LiveAccount[]; account?: string; mode?: string; unresolved_diffs?: number; recent_runs?: LiveReconRun[]; recent_events?: LiveSystemEvent[] }>(
+      account ? `/api/live/health?account=${encodeURIComponent(account)}` : '/api/live/health',
+    ),
+
+  liveScheduler: () =>
+    request<{ running: boolean; orders_interval_s?: number; positions_interval_s?: number; daily_at?: string; last_orders_recon?: Record<string, string>; last_positions_recon?: Record<string, string>; last_daily_recon?: string | null; registered_brokers?: string[]; message?: string }>(
+      '/api/live/scheduler',
+    ),
+
+  liveSchedulerRunNow: () =>
+    request<{ ok: boolean; message?: string }>('/api/live/scheduler/run-now', { method: 'POST' }),
+
+  liveReconciliation: (account?: string) =>
+    request<{ runs: LiveReconRun[]; diffs: LiveReconDiff[] }>(
+      account ? `/api/live/reconciliation?account=${encodeURIComponent(account)}` : '/api/live/reconciliation',
+    ),
+
+  liveTriggerReconciliation: (account: string) =>
+    request<{ run_id: string; status: string; diff_count: number }>(
+      `/api/live/reconciliation/run?account=${encodeURIComponent(account)}`, { method: 'POST' },
+    ),
+
+  liveAutonomy: () =>
+    request<{ grants: LiveAutonomyGrant[] }>('/api/live/autonomy'),
+
+  liveCreateAutonomy: (body: { strategy_id: string; level: number; max_order_value?: number }) =>
+    request<{ grant: LiveAutonomyGrant }>('/api/live/autonomy', {
+      method: 'POST', body: JSON.stringify(body),
+    }),
+
+  liveRevokeAutonomy: (id: string) =>
+    request<{ ok: boolean }>(`/api/live/autonomy/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
+
+  liveArm: (account: string) =>
+    request<{ account_id: string; mode: string }>(`/api/live/arm?account=${encodeURIComponent(account)}`, { method: 'POST' }),
+
+  liveDisarm: (account: string) =>
+    request<{ account_id: string; mode: string }>(`/api/live/disarm?account=${encodeURIComponent(account)}`, { method: 'POST' }),
 }
 
 // ===== Pipeline =====

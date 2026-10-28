@@ -123,6 +123,15 @@ export const QK = {
   paperAutoRules:       (acc: string) => ['paper', 'auto-rules', acc] as const,
   alerts:               (source?: string) => ['alerts', source ?? ''] as const,
 
+  // 实盘交易 (与模拟盘隔离; liveAll 作账户无关失效前缀)
+  liveAll:              ['live'] as const,
+  liveAccounts:         ['live', 'accounts'] as const,
+  liveOrders:           (acc?: string) => ['live', 'orders', acc ?? ''] as const,
+  liveApprovals:        ['live', 'approvals'] as const,
+  liveHealth:           (acc?: string) => ['live', 'health', acc ?? ''] as const,
+  liveReconciliation:  ['live', 'reconciliation'] as const,
+  liveAutonomy:        ['live', 'autonomy'] as const,
+
   // AI 大盘复盘
   reviewReports:        ['review-reports'] as const,
 

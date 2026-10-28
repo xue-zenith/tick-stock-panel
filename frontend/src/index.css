@@ -8,6 +8,7 @@
  */
 :root {
   /* 亮色(可切换) */
+  color-scheme: light;       /* 原生控件(select 弹层/滚动条)按浅色渲染 */
   --base: 0 0% 98%;          /* #FAFAFA */
   --surface: 0 0% 100%;      /* #FFFFFF */
   --elevated: 240 5% 96%;    /* #F4F4F5 */
@@ -23,6 +24,7 @@
 }
 
 html.dark {
+  color-scheme: dark;        /* 让原生控件(select 弹层/滚动条)按深色渲染 */
   --base: 240 5% 5%;         /* #0A0A0B */
   --surface: 240 7% 10%;     /* #18181B 略亮一点,与 base 对比清晰 */
   --elevated: 240 9% 14%;    /* #212126 */
