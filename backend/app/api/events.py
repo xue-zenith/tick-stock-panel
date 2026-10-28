@@ -27,19 +27,35 @@ _POLL_S = 0.5
 
 @router.post("/ticket")
 def issue_ticket(request: Request):
-    """Bearer Token (任意 scope) → 一次性 SSE 票据。"""
+    """登录会话或 Bearer Token → 一次性 SSE 票据。"""
     # 认证与限流已在网关中间件完成 (scope 规则 "*"); 端点内再验一次
     # 明文是为了拿到 Token 记录、让票据继承 scope (不放大权限)。
     authz = request.headers.get("authorization", "")
     plaintext = authz[len("Bearer "):].strip() if authz.startswith("Bearer ") else ""
 
     from app.services import api_tokens
+    from app.services import auth as auth_service
+    from app.services.api_gateway import is_local_network
 
-    record = api_tokens.verify_token(request.app.state.repo.store.data_dir, plaintext)
-    if record is None:
-        raise HTTPException(status_code=401, detail="API Token 无效或已吊销")
+    scopes: list[str]
+    if plaintext:
+        record = api_tokens.verify_token(request.app.state.repo.store.data_dir, plaintext)
+        if record is None:
+            raise HTTPException(status_code=401, detail="API Token 无效或已吊销")
+        scopes = list(record.get("scopes", []))
+    else:
+        session = request.cookies.get("tf_session")
+        local_unconfigured = (
+            not auth_service.is_configured()
+            and request.client is not None
+            and is_local_network(request.client.host)
+        )
+        if not ((session and auth_service.is_valid_session(session)) or local_unconfigured):
+            raise HTTPException(status_code=401, detail="未登录或会话已过期")
+        # UI 会话与主站权限一致；外部 Token 仍严格继承其 scopes。
+        scopes = ["*"]
     try:
-        ticket, ttl = event_tickets.issue(record.get("scopes", []))
+        ticket, ttl = event_tickets.issue(scopes)
     except RuntimeError as e:
         raise HTTPException(status_code=429, detail=str(e)) from e
     return {"ticket": ticket, "expires_in": int(ttl), "stream": "/api/events?ticket=" + ticket}

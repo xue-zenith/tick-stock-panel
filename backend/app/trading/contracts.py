@@ -227,6 +227,7 @@ class AutonomyGrant:
     """
 
     grant_id: str
+    account_id: str                       # 授权仅对该实盘账户生效
     strategy_id: str                      # 授权对象 (策略或 AI agent ID)
     level: int                             # 0=观察 / 1=建议 / 2=监督执行 / 3=有界自治
     max_order_value: float = 0.0          # 单笔上限 (level>=2 才生效)

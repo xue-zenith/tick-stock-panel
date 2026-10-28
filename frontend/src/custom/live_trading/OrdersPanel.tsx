@@ -1,7 +1,7 @@
 /**
  * 订单面板 — 列表 + 提交表单 + 撤单 + 行展开 (事件 + 成交明细)。
  */
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Send, ChevronRight } from 'lucide-react'
 import { api, type LiveOrder, type LiveOrderEvent, type LiveExecution } from '@/lib/api'
@@ -38,6 +38,7 @@ const STATE_COLOR: Record<string, string> = {
 export function OrdersPanel({ account_id }: { account_id: string | null }) {
   const qc = useQueryClient()
   const { data } = useQuery({
+    enabled: !!account_id,
     queryKey: QK.liveOrders(account_id ?? ''),
     queryFn: () => api.liveOrders(undefined, account_id ?? undefined),
   })
@@ -62,6 +63,10 @@ export function OrdersPanel({ account_id }: { account_id: string | null }) {
           提交交易意图
         </button>
       </div>
+
+      {cancelM.isError && (
+        <div className="rounded-lg border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger">撤单失败：{String(cancelM.error)}</div>
+      )}
 
       {orders.length === 0 ? (
         <div className="text-sm text-muted-foreground">暂无订单</div>
@@ -105,7 +110,10 @@ export function OrdersPanel({ account_id }: { account_id: string | null }) {
         <SubmitIntentModal
           account_id={account_id}
           onClose={() => setSubmitOpen(false)}
-          onSubmitted={() => qc.invalidateQueries({ queryKey: QK.liveOrders(account_id) })}
+          onSubmitted={() => {
+            qc.invalidateQueries({ queryKey: QK.liveOrders(account_id) })
+            qc.invalidateQueries({ queryKey: QK.liveApprovals })
+          }}
         />
       )}
     </div>
@@ -234,17 +242,19 @@ function SubmitIntentModal({
   const [limitPrice, setLimitPrice] = useState<string>('')
   const [result, setResult] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const dedupeKey = useRef(`ui_${crypto.randomUUID()}`)
 
   const submitM = useMutation({
     mutationFn: () =>
       api.liveSubmitOrder({
         account_id,
-        symbol,
+        symbol: symbol.trim().toUpperCase(),
         side,
         qty,
         price_policy: pricePolicy,
         limit_price: limitPrice ? Number(limitPrice) : null,
         source: 'manual',
+        dedupe_key: dedupeKey.current,
       }),
     onSuccess: (r) => {
       setResult(`意图 ${r.intent_id} | 状态: ${r.status}${r.reasons?.length ? ' | 原因: ' + r.reasons.join('; ') : ''}`)
@@ -274,7 +284,7 @@ function SubmitIntentModal({
             <label className={LABEL_CLS}>证券代码</label>
             <input
               value={symbol}
-              onChange={(e) => setSymbol(e.target.value)}
+              onChange={(e) => setSymbol(e.target.value.toUpperCase())}
               placeholder="600519.SH"
               className={`${INPUT_CLS} font-mono`}
             />
@@ -312,7 +322,7 @@ function SubmitIntentModal({
         <div className="mt-5 flex gap-2">
           <button
             onClick={() => submitM.mutate()}
-            disabled={submitM.isPending || !symbol || (needsPrice && !limitPrice)}
+            disabled={submitM.isPending || !symbol.trim() || qty <= 0 || qty % 100 !== 0 || (needsPrice && (!limitPrice || Number(limitPrice) <= 0))}
             className="flex-1 rounded-btn bg-accent py-2 text-sm font-medium text-white transition-opacity hover:bg-accent/90 disabled:opacity-50"
           >
             {submitM.isPending ? '提交中…' : '提交'}

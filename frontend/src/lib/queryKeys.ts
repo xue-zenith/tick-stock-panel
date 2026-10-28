@@ -125,12 +125,15 @@ export const QK = {
 
   // 实盘交易 (与模拟盘隔离; liveAll 作账户无关失效前缀)
   liveAll:              ['live'] as const,
+  liveBrokers:          ['live', 'brokers'] as const,
   liveAccounts:         ['live', 'accounts'] as const,
+  liveAccountDetail:    (acc?: string) => ['live', 'detail', acc ?? ''] as const,
   liveOrders:           (acc?: string) => ['live', 'orders', acc ?? ''] as const,
   liveExecutions:      (acc?: string) => ['live', 'executions', acc ?? ''] as const,
   liveApprovals:        ['live', 'approvals'] as const,
   liveHealth:           (acc?: string) => ['live', 'health', acc ?? ''] as const,
-  liveReconciliation:  ['live', 'reconciliation'] as const,
+  liveReconciliation:  (acc?: string) => ['live', 'reconciliation', acc ?? ''] as const,
+  liveScheduler:        ['live', 'scheduler'] as const,
   liveAutonomy:        ['live', 'autonomy'] as const,
 
   // AI 大盘复盘

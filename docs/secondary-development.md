@@ -172,6 +172,7 @@ const extension: FrontendExtension = {
 当前已经实现的继承点：
 
 - `NotificationFormatter`：在监控规则完成评估后统一调整通知文案，不改变事件结构和触发语义。
+- 实盘交易专用 `BrokerAdapter`：通过 `app.trading.brokers.registry.register` 注册账户级工厂，并显式声明能力、状态映射、专用报单预检、撤单确认和回调安全。它属于交易域协议，不是通用 `BackendExtensionRegistrar` 继承点；接入前须完成真实券商沙箱测试和对账演练。
 
 下列是可能适合的小粒度接口，但目前没有实现，不能直接导入：
 
@@ -225,7 +226,7 @@ def setup(registrar: BackendExtensionRegistrar) -> None:
 
 同一个 `setup` 可以通过 `registrar.include_router(router)` 注册独立 FastAPI 路由。核心路由冲突、重复 ID 或契约版本不匹配时，该扩展整体不注册，不留下半注册状态。
 
-核心数据层初始化完成后，可选的 `startup(context: ExtensionContext)` 会收到数据目录和只读仓库协议。启动钩子失败只记录错误，不阻止主程序启动。
+核心数据层初始化完成后，可选的 `startup(context: ExtensionContext)` 会收到数据目录和只读仓库协议。启动钩子失败只记录错误，不阻止主程序启动。扩展如创建后台任务或外部连接，还应实现可选的同步或异步 `shutdown(context)`；应用退出时按模块逆序调用，单个清理失败不会阻止其他扩展关闭。
 
 完整后端模板位于 [`backend/app/custom/_template.py.example`](../backend/app/custom/_template.py.example)。
 

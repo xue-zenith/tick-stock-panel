@@ -3,7 +3,7 @@
 适配器职责 (相对模拟盘的关键差异):
   - 把券商原始枚举映射成本地 OrderState (未知状态 fail-closed 到 unknown);
   - submit 返回 {broker_order_id} 或 {error} 或 None (超时);
-  - cancel best-effort (失败也允许本地标 CANCELLED);
+  - cancel 必须返回券商确认；失败时本地状态不得伪装成 CANCELLED;
   - 不修改业务数据库 (审计与状态由 OMS 统一持久化);
   - 不执行策略和风控.
 
@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from app.trading.brokers.policies import BrokerCapabilities
+
 
 class BrokerAdapter(Protocol):
     """券商适配器最小协议 (OMS 侧只调这几个方法)."""
@@ -21,6 +23,19 @@ class BrokerAdapter(Protocol):
     @property
     def name(self) -> str:
         """适配器名称 (mock / xtquant / futu / ibkr)."""
+        ...
+
+    @property
+    def capabilities(self) -> BrokerCapabilities:
+        """声明支持的资产、订单类型、撤单确认与回调安全能力。"""
+        ...
+
+    def normalize_order(self, row: dict) -> dict:
+        """把厂商委托字段和状态枚举映射为平台标准结构。"""
+        ...
+
+    def validate_order(self, order: dict) -> dict:
+        """厂商专用预检 → {allowed: bool, reason?: str}。"""
         ...
 
     def connect(self) -> dict:
@@ -60,5 +75,5 @@ class BrokerAdapter(Protocol):
         ...
 
     def cancel(self, broker_order_id: str | None) -> dict:
-        """撤单 (best-effort). 返回 {success: bool}."""
+        """撤单并等待券商确认 → {success: bool, error?: str}."""
         ...

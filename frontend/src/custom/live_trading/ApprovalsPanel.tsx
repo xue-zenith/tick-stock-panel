@@ -24,11 +24,18 @@ export function ApprovalsPanel() {
   })
 
   if (approvals.length === 0) {
-    return <div className="text-sm text-muted-foreground">无待审批意图</div>
+    return <div className="rounded-xl border border-dashed border-border py-12 text-center text-sm text-muted-foreground">当前没有待审批交易意图</div>
   }
 
   return (
-    <div className="overflow-x-auto rounded-md border border-border">
+    <div className="space-y-3">
+      <div className="rounded-lg border border-warning/25 bg-warning/5 px-3 py-2 text-xs leading-5 text-warning">
+        审批通过会立即向当前账户的券商适配器报单；断线、超时或缺少券商订单号将进入 UNKNOWN，禁止自动重发。
+      </div>
+      {(approveM.isError || rejectM.isError) && (
+        <div className="rounded-lg border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger">操作失败：{String(approveM.error || rejectM.error)}</div>
+      )}
+      <div className="overflow-x-auto rounded-xl border border-border">
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-border text-muted-foreground">
@@ -62,7 +69,7 @@ export function ApprovalsPanel() {
                     onClick={() => approveM.mutate(a.approval_id)}
                     disabled={approveM.isPending}
                     className="rounded-btn bg-emerald-500 p-1.5 text-white transition-opacity hover:bg-emerald-600 disabled:opacity-50"
-                    title="审批通过 → 创建订单"
+                    title="审批通过并立即报送券商"
                   >
                     <Check size={12} />
                   </button>
@@ -80,6 +87,7 @@ export function ApprovalsPanel() {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   )
 }

@@ -14,11 +14,12 @@ export function HealthPanel({ account_id }: { account_id: string | null }) {
     queryFn: () => api.liveHealth(account_id!),
   })
   const reconQ = useQuery({
-    queryKey: QK.liveReconciliation,
+    enabled: !!account_id,
+    queryKey: QK.liveReconciliation(account_id ?? ''),
     queryFn: () => api.liveReconciliation(account_id ?? undefined),
   })
   const schedQ = useQuery({
-    queryKey: ['live', 'scheduler'],
+    queryKey: QK.liveScheduler,
     queryFn: () => api.liveScheduler(),
     staleTime: 15_000,
   })
@@ -26,15 +27,17 @@ export function HealthPanel({ account_id }: { account_id: string | null }) {
   const reconM = useMutation({
     mutationFn: () => api.liveTriggerReconciliation(account_id!),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: QK.liveReconciliation })
+      qc.invalidateQueries({ queryKey: QK.liveReconciliation(account_id ?? '') })
       qc.invalidateQueries({ queryKey: QK.liveHealth(account_id ?? '') })
+      qc.invalidateQueries({ queryKey: QK.liveAccountDetail(account_id ?? '') })
     },
   })
   const runNowM = useMutation({
     mutationFn: () => api.liveSchedulerRunNow(),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['live', 'scheduler'] })
-      qc.invalidateQueries({ queryKey: QK.liveReconciliation })
+      qc.invalidateQueries({ queryKey: QK.liveScheduler })
+      qc.invalidateQueries({ queryKey: QK.liveReconciliation(account_id ?? '') })
+      qc.invalidateQueries({ queryKey: QK.liveAccountDetail(account_id ?? '') })
     },
   })
 
@@ -110,6 +113,12 @@ export function HealthPanel({ account_id }: { account_id: string | null }) {
           手动对账 (本账户)
         </button>
       </div>
+
+      {(reconM.isError || runNowM.isError) && (
+        <div className="rounded-lg border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger">
+          对账失败：{String(reconM.error || runNowM.error)}
+        </div>
+      )}
 
       {unresolved > 0 && (
         <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-600 dark:text-amber-400">

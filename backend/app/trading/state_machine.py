@@ -34,6 +34,7 @@ _TRANSITIONS: dict[tuple[OrderState, str], OrderState] = {
     (OrderState.RISK_PASSED, "cancel"): OrderState.CANCELLED,
     # 提交券商
     (OrderState.APPROVED, "submit_to_broker"): OrderState.SUBMITTED,
+    (OrderState.APPROVED, "submit_started"): OrderState.UNKNOWN,
     (OrderState.APPROVED, "cancel"): OrderState.CANCELLED,
     # 券商回报 (SUBMITTED 起步)
     (OrderState.SUBMITTED, "partial_fill"): OrderState.PARTIALLY_FILLED,
@@ -48,6 +49,7 @@ _TRANSITIONS: dict[tuple[OrderState, str], OrderState] = {
     (OrderState.PARTIALLY_FILLED, "report_unknown"): OrderState.UNKNOWN,
     # UNKNOWN 退出路径: 只能通过 reconcile (券商查询) 解决
     (OrderState.UNKNOWN, "reconcile_filled"): OrderState.FILLED,
+    (OrderState.UNKNOWN, "reconcile_submitted"): OrderState.SUBMITTED,
     (OrderState.UNKNOWN, "reconcile_cancelled"): OrderState.CANCELLED,
     (OrderState.UNKNOWN, "reconcile_rejected"): OrderState.REJECTED,
     (OrderState.UNKNOWN, "reconcile_partial"): OrderState.PARTIALLY_FILLED,

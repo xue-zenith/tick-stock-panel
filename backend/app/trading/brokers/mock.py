@@ -24,7 +24,18 @@ import time
 import uuid
 from dataclasses import dataclass
 
+from app.trading.brokers.policies import BrokerCapabilities, BrokerStatusMapper
+
 logger = logging.getLogger(__name__)
+
+_STATUS_MAPPER = BrokerStatusMapper({
+    "submitted": "submitted",
+    "partial": "partially_filled",
+    "partially_filled": "partially_filled",
+    "filled": "filled",
+    "cancelled": "cancelled",
+    "rejected": "rejected",
+})
 
 
 @dataclass
@@ -61,23 +72,49 @@ class MockBrokerAdapter:
         self._lock = threading.Lock()
         self._callback_handler = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._connected = False
 
     @property
     def name(self) -> str:
         return "mock"
+
+    @property
+    def capabilities(self) -> BrokerCapabilities:
+        return BrokerCapabilities(
+            asset_types=("stock", "etf"),
+            time_in_force=("day", "gtc", "ioc", "fok"),
+            supports_market_orders=True,
+            supports_partial_fills=True,
+            supports_cancel_confirmation=True,
+            supports_push_callbacks=True,
+            callback_signature="in-process",
+        )
+
+    def normalize_order(self, row: dict) -> dict:
+        normalized = dict(row)
+        normalized["state"] = _STATUS_MAPPER.normalize(row.get("state"))
+        return normalized
+
+    def validate_order(self, order: dict) -> dict:
+        if order.get("price_policy") == "market" and not self.capabilities.supports_market_orders:
+            return {"allowed": False, "reason": "适配器不支持市价单"}
+        if order.get("tif", "day") not in self.capabilities.time_in_force:
+            return {"allowed": False, "reason": "适配器不支持该有效期类型"}
+        return {"allowed": True}
 
     def set_callback_handler(self, handler) -> None:
         """注册 OMS.on_broker_callback (或测试桩). handler(dict) → dict."""
         self._callback_handler = handler
 
     def connect(self) -> dict:
+        self._connected = True
         return {"connected": True, "account_id": self._account_id}
 
     def disconnect(self) -> None:
-        pass
+        self._connected = False
 
     def health(self) -> dict:
-        return {"connected": True, "latency_ms": self._config.latency_ms}
+        return {"connected": self._connected, "latency_ms": self._config.latency_ms}
 
     def get_account(self) -> dict:
         mv = sum(p.get("qty", 0) * p.get("last_price", 0) for p in self._positions.values())
@@ -100,7 +137,7 @@ class MockBrokerAdapter:
         ]
 
     def get_orders(self) -> list[dict]:
-        return list(self._orders.values())
+        return [self.normalize_order(row) for row in self._orders.values()]
 
     def get_executions(self) -> list[dict]:
         return [
@@ -127,8 +164,9 @@ class MockBrokerAdapter:
 
         # 订单初始状态: 未成交 (成交由 _fire_callback 累加)
         state = {
+            "broker_order_id": broker_order_id,
             "symbol": order["symbol"], "qty": order["qty"],
-            "filled_qty": 0, "avg_price": 0,
+            "filled_qty": 0, "avg_price": 0, "state": "submitted",
         }
         with self._lock:
             self._orders[broker_order_id] = state
@@ -153,7 +191,8 @@ class MockBrokerAdapter:
         with self._lock:
             if broker_order_id in self._orders:
                 self._orders[broker_order_id]["cancelled"] = True
-        return {"success": True}
+                self._orders[broker_order_id]["state"] = "cancelled"
+        return {"success": True, "confirmed": True, "state": "cancelled"}
 
     # ── 回调触发 (内部) ─────────────────────────────
     def fire_callback(self, broker_order_id: str, order: dict) -> dict:
@@ -173,9 +212,31 @@ class MockBrokerAdapter:
                 price = round(price * (1 + random.uniform(-self._config.fill_price_jitter, self._config.fill_price_jitter)), 4)
             o["filled_qty"] = int(o.get("filled_qty", 0)) + fill_qty
             o["avg_price"] = price
+            o["state"] = "filled" if o["filled_qty"] >= int(order["qty"]) else "partially_filled"
             o["ts"] = _now_iso()
             o["_last_exec_id"] = f"bk_trade_{_uuid()}"
             broker_trade_id = o["_last_exec_id"]
+
+            notional = fill_qty * price
+            sym = order["symbol"]
+            side = order["side"]
+            pos = self._positions.setdefault(sym, {
+                "qty": 0, "available_qty": 0, "avg_cost": 0.0, "last_price": price,
+            })
+            if side == "buy":
+                old_qty = int(pos.get("qty", 0))
+                new_qty = old_qty + fill_qty
+                pos["avg_cost"] = (
+                    (float(pos.get("avg_cost", 0)) * old_qty + notional) / new_qty
+                    if new_qty else 0.0
+                )
+                pos["qty"] = new_qty
+                self._cash -= notional
+            else:
+                pos["qty"] = max(0, int(pos.get("qty", 0)) - fill_qty)
+                pos["available_qty"] = max(0, int(pos.get("available_qty", 0)) - fill_qty)
+                self._cash += notional
+            pos["last_price"] = price
 
         dedupe_key = f"mock:{self._account_id}:{broker_trade_id}"
 

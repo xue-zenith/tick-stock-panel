@@ -23,7 +23,7 @@ import logging
 from pathlib import Path
 
 from app.market_time import cn_now
-from app.trading import oms, store
+from app.trading import broker_service, oms, store
 from app.trading.brokers import registry as broker_registry
 
 logger = logging.getLogger(__name__)
@@ -147,35 +147,43 @@ class ReconciliationScheduler:
     ) -> None:
         """对单个账户拉取 broker 状态并触发对账。"""
         assert self._data_dir is not None
-        adapter = broker_registry.get_adapter(broker_name, account_id)
-        if adapter is None:
-            # 无注册适配器: 跳过 (不报错, 不写差异)
-            return
-
-        # 拉 broker 订单 (轻量, 每次都拉)
-        broker_orders: list[dict] = []
-        broker_positions: list[dict] = []
-        broker_cash: float | None = None
-
         try:
-            broker_orders = adapter.get_orders()
-        except Exception:  # noqa: BLE001 — broker 拉取失败不阻塞
-            logger.debug("get_orders failed for %s", account_id, exc_info=True)
-
-        if fetch_positions:
-            try:
-                broker_positions = adapter.get_positions()
-            except Exception:  # noqa: BLE001
-                logger.debug("get_positions failed for %s", account_id, exc_info=True)
-            try:
-                broker_cash = adapter.get_account().get("cash")
-            except Exception:  # noqa: BLE001
-                logger.debug("get_account failed for %s", account_id, exc_info=True)
+            # 券商 SDK 多为同步阻塞接口，放到 worker thread，不能卡住 asyncio 主循环。
+            adapter = await asyncio.to_thread(
+                broker_service.require_connected,
+                self._data_dir, broker_name, account_id,
+            )
+            pulled = await asyncio.to_thread(
+                broker_service.pull, adapter, include_positions=fetch_positions,
+            )
+            await asyncio.to_thread(
+                broker_service.ingest_executions,
+                self._data_dir, account_id, broker_name, list(pulled["executions"]),
+            )
+        except (broker_service.BrokerUnavailableError, broker_service.BrokerSyncError) as exc:
+            acc = store.get_account(self._data_dir, account_id)
+            if acc is not None and acc["mode"] in ("armed_manual", "armed_auto"):
+                store.set_account_mode(self._data_dir, account_id, "degraded")
+            store.log_system_event(self._data_dir, "scheduled_reconcile_failed", {
+                "account_id": account_id, "reason": reason, "error": str(exc),
+            })
+            return
 
         result = oms.trigger_reconciliation(
             self._data_dir, account_id,
-            broker_orders, broker_positions, broker_cash,
+            list(pulled["orders"]),
+            None if pulled["positions"] is None else list(pulled["positions"]),
+            None if pulled["account"] is None else dict(pulled["account"])["cash"],
         )
+
+        if fetch_positions:
+            acc = store.get_account(self._data_dir, account_id)
+            await asyncio.to_thread(
+                broker_service.persist_snapshot,
+                self._data_dir, account_id,
+                acc["mode"] if acc is not None else "disarmed",
+                pulled,
+            )
 
         # 记录对账时间 (供 health 端点展示)
         ts = cn_now().isoformat()

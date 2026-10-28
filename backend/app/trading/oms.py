@@ -15,17 +15,22 @@ OMS 是实盘的核心 (相对模拟盘的关键差异):
 """
 from __future__ import annotations
 
+import json
 import logging
 import uuid
+from datetime import datetime
 from pathlib import Path
 
+from app.market_time import cn_now
 from app.trading import autonomy, events, reconciliation, risk, store
 from app.trading.contracts import (
     ApprovalDecision,
     OrderState,
+    PricePolicy,
     RiskVerdict,
     Side,
     SourceType,
+    TimeInForce,
     TradeIntent,
     TradingMode,
 )
@@ -156,6 +161,18 @@ def submit_intent(
             "approval_id": f"ap_{_uuid()}",
             "intent_id": intent.intent_id,
             "expires_at": valid_until or _default_expiry(),
+            "order_snapshot": json.dumps({
+                "account_id": intent.account_id,
+                "symbol": intent.symbol,
+                "side": intent.side.value,
+                "qty": intent.qty,
+                "price_policy": str(intent.price_policy),
+                "limit_price": intent.limit_price,
+                "tif": str(intent.tif),
+                "source": intent.source.value,
+                "ruleset_version": intent.ruleset_version,
+                "risk_verdict": verdict.value,
+            }, ensure_ascii=False, sort_keys=True),
         })
         publish.append(events.approval_pending(account_id, symbol, intent.intent_id, side))
     else:
@@ -186,14 +203,47 @@ def approve(
     data_dir: Path,
     intent_id: str,
     approver: str | None = None,
+    risk_ctx: risk.RiskContext | None = None,
 ) -> dict:
-    """人工审批通过 → 创建 BrokerOrder (APPROVED), 等待 submit_to_broker."""
+    """人工审批通过 → 创建 BrokerOrder。
+
+    API 路径会注入审批时重建的 risk_ctx，防止提交意图后资金、持仓或行情变化
+    仍沿用旧风控结果。直接域调用至少也会再次检查账户仍处于人工启用模式。
+    """
     store.init_db(data_dir)
     intent = store.get_intent(data_dir, intent_id)
     if intent is None:
         raise TradingError(f"意图不存在: {intent_id!r}")
     if intent["status"] != "pending":
         raise TradingError(f"意图状态 {intent['status']!r}, 不能审批")
+    account = store.get_account(data_dir, intent["account_id"])
+    if account is None:
+        raise TradingError(f"账户不存在: {intent['account_id']!r}")
+    if account["mode"] != TradingMode.ARMED_MANUAL.value:
+        raise TradingError(f"账户模式 {account['mode']!r}，不能审批并报单")
+
+    if risk_ctx is not None:
+        replay = TradeIntent(
+            intent_id=intent["intent_id"],
+            account_id=intent["account_id"],
+            strategy_id=intent.get("strategy_id"),
+            symbol=intent["symbol"],
+            side=Side(intent["side"]),
+            qty=int(intent["qty"]),
+            price_policy=PricePolicy(intent["price_policy"]),
+            limit_price=intent.get("limit_price"),
+            tif=TimeInForce(intent["tif"]),
+            source=SourceType(intent["source"]),
+            dedupe_key=intent["dedupe_key"],
+            proposed_at=intent["proposed_at"],
+            valid_until=intent.get("valid_until"),
+            ruleset_version=intent["ruleset_version"],
+            rationale=intent.get("rationale") or "",
+            status=intent["status"],
+        )
+        verdict, reasons = risk.evaluate(replay, risk_ctx)
+        if verdict != RiskVerdict.PASS.value:
+            raise TradingError(f"审批时风控未通过: {'；'.join(reasons)}")
 
     rows = store._query(
         data_dir,
@@ -202,13 +252,28 @@ def approve(
     )
     if not rows:
         raise TradingError(f"意图 {intent_id!r} 无待审批记录")
-    approval_id = rows[0]["approval_id"]
+    approval = rows[0]
+    approval_id = approval["approval_id"]
+    try:
+        expired = datetime.fromisoformat(approval["expires_at"]) <= cn_now()
+    except (TypeError, ValueError):
+        expired = True
+    if expired:
+        try:
+            store.finalize_approval(
+                data_dir,
+                intent_id=intent_id,
+                approval_id=approval_id,
+                decision=ApprovalDecision.EXPIRED.value,
+                intent_status="expired",
+                approver=approver,
+            )
+        except RuntimeError as exc:
+            raise TradingError(str(exc)) from exc
+        raise TradingError("审批已过期，请重新提交交易意图")
 
     order_id = f"ord_{_uuid()}"
-    store.update_intent_status(data_dir, intent_id, "approved")
-    store.decide_approval(data_dir, approval_id, ApprovalDecision.APPROVED.value, approver)
-
-    store.insert_order(data_dir, {
+    order = {
         "order_id": order_id,
         "broker_order_id": None,
         "account_id": intent["account_id"],
@@ -222,7 +287,19 @@ def approve(
         "submitted_at": None,
         "last_update_at": events.now_iso(),
         "reject_reason": None,
-    })
+    }
+    try:
+        store.finalize_approval(
+            data_dir,
+            intent_id=intent_id,
+            approval_id=approval_id,
+            decision=ApprovalDecision.APPROVED.value,
+            intent_status="approved",
+            approver=approver,
+            order=order,
+        )
+    except RuntimeError as exc:
+        raise TradingError(str(exc)) from exc
     store.log_system_event(data_dir, "approved", {"order_id": order_id, "intent_id": intent_id})
 
     events.publish(
@@ -248,8 +325,17 @@ def reject(data_dir: Path, intent_id: str, approver: str | None = None) -> dict:
     )
     if not rows:
         raise TradingError(f"意图 {intent_id!r} 无待审批记录")
-    store.decide_approval(data_dir, rows[0]["approval_id"], ApprovalDecision.REJECTED.value, approver)
-    store.update_intent_status(data_dir, intent_id, "rejected")
+    try:
+        store.finalize_approval(
+            data_dir,
+            intent_id=intent_id,
+            approval_id=rows[0]["approval_id"],
+            decision=ApprovalDecision.REJECTED.value,
+            intent_status="rejected",
+            approver=approver,
+        )
+    except RuntimeError as exc:
+        raise TradingError(str(exc)) from exc
 
     events.publish(
         data_dir,
@@ -271,51 +357,86 @@ def submit_to_broker(data_dir: Path, order_id: str, broker) -> dict:
         raise TradingError(f"订单不存在: {order_id!r}")
     if order["state"] != OrderState.APPROVED.value:
         raise TradingError(f"订单状态 {order['state']!r}, 不能提交券商")
+    account = store.get_account(data_dir, order["account_id"])
+    if account is None or account["mode"] != TradingMode.ARMED_MANUAL.value:
+        mode = account["mode"] if account is not None else "missing"
+        raise TradingError(f"账户模式 {mode!r}，禁止提交券商")
+
+    intent = store.get_intent(data_dir, order["intent_id"]) or {}
+    broker_order = {
+        "order_id": order_id,
+        "account_id": order["account_id"],
+        "symbol": order["symbol"],
+        "side": order["side"],
+        "qty": order["qty"],
+        "price_policy": order["price_policy"],
+        "limit_price": order["limit_price"],
+        "tif": intent.get("tif", "day"),
+    }
+    validator = getattr(broker, "validate_order", None)
+    if callable(validator):
+        try:
+            preflight = validator(dict(broker_order)) or {}
+        except Exception as exc:
+            raise TradingError(f"券商专用报单预检失败: {exc}") from exc
+        if not preflight.get("allowed"):
+            raise TradingError(str(preflight.get("reason") or "券商专用报单预检未通过"))
+
+    # 在任何外部 I/O 前先把本地状态持久化为 UNKNOWN。这样进程在网络调用中崩溃时，
+    # 重启后不会把“券商可能已接收”的单误当作可安全重发；回调可从 UNKNOWN 推进。
+    pre_state = transition(OrderState.APPROVED, "submit_started")
+    store.update_order_state(
+        data_dir, order_id, pre_state.value,
+        submitted_at=events.now_iso(),
+        event_from_state=order["state"], event_reason="submit_started",
+    )
 
     # 调 broker (可能抛 / 返回 None)
     try:
-        result = broker.submit({
-            "order_id": order_id,
-            "account_id": order["account_id"],
-            "symbol": order["symbol"],
-            "side": order["side"],
-            "qty": order["qty"],
-            "price_policy": order["price_policy"],
-            "limit_price": order["limit_price"],
-        })
+        result = broker.submit(broker_order)
     except Exception:  # noqa: BLE001 — broker 适配器异常不阻塞 OMS, 进 UNKNOWN
         logger.warning("提交券商异常, 进入 UNKNOWN", exc_info=True)
-        store.update_order_state(
-            data_dir, order_id, OrderState.UNKNOWN.value,
-            event_from_state=order["state"], event_reason="submit_exception",
-        )
+        store.log_system_event(data_dir, "submit_exception", {"order_id": order_id})
         return {"order_id": order_id, "state": OrderState.UNKNOWN.value}
 
     if result is None:
         # 超时: 不重发, 进入 UNKNOWN
-        store.update_order_state(
-            data_dir, order_id, OrderState.UNKNOWN.value,
-            event_from_state=order["state"], event_reason="submit_timeout",
-        )
+        store.log_system_event(data_dir, "submit_timeout", {"order_id": order_id})
         return {"order_id": order_id, "state": OrderState.UNKNOWN.value}
 
     if "error" in result:
+        current = store.get_order(data_dir, order_id)
+        if current is None:
+            raise TradingError(f"订单不存在: {order_id!r}")
+        new_state = transition(OrderState(current["state"]), "reconcile_rejected")
         store.update_order_state(
-            data_dir, order_id, OrderState.REJECTED.value,
+            data_dir, order_id, new_state.value,
             broker_order_id=result.get("broker_order_id"),
             reject_reason=result["error"],
-            event_from_state=order["state"], event_reason="broker_reject",
+            event_from_state=current["state"], event_reason="broker_reject",
         )
         return {"order_id": order_id, "state": OrderState.REJECTED.value, "reason": result["error"]}
 
     broker_order_id = result.get("broker_order_id")
-    store.update_order_state(
-        data_dir, order_id, OrderState.SUBMITTED.value,
-        broker_order_id=broker_order_id,
-        submitted_at=events.now_iso(),
-        event_from_state=order["state"], event_reason="submit_to_broker",
-    )
-    return {"order_id": order_id, "broker_order_id": broker_order_id, "state": OrderState.SUBMITTED.value}
+    if not broker_order_id:
+        store.log_system_event(data_dir, "submit_missing_broker_order_id", {"order_id": order_id})
+        return {"order_id": order_id, "state": OrderState.UNKNOWN.value}
+
+    store.bind_broker_order_id(data_dir, order_id, str(broker_order_id))
+    current = store.get_order(data_dir, order_id)
+    if current is None:
+        raise TradingError(f"订单不存在: {order_id!r}")
+    if current["state"] == OrderState.UNKNOWN.value:
+        new_state = transition(OrderState.UNKNOWN, "reconcile_submitted")
+        store.update_order_state(
+            data_dir, order_id, new_state.value,
+            event_from_state=current["state"], event_reason="submit_confirmed",
+        )
+        state = new_state.value
+    else:
+        # callback-before-response：回调已推进到部分/全部成交，不允许状态倒退。
+        state = current["state"]
+    return {"order_id": order_id, "broker_order_id": broker_order_id, "state": state}
 
 
 def cancel(data_dir: Path, order_id: str, broker=None) -> dict:
@@ -333,12 +454,38 @@ def cancel(data_dir: Path, order_id: str, broker=None) -> dict:
     if cur in (OrderState.CANCELLED, OrderState.FILLED, OrderState.REJECTED, OrderState.EXPIRED):
         return {"order_id": order_id, "state": cur.value, "already_terminal": True}
 
-    # SUBMITTED/PARTIALLY_FILLED 需 broker 接口撤单 (best-effort: 失败也允许本地标 CANCELLED)
-    if cur in (OrderState.SUBMITTED, OrderState.PARTIALLY_FILLED) and broker is not None:
+    # 已送券商的订单只有拿到确认回执才能本地标 CANCELLED。连接/撤单失败必须保留
+    # 原状态，避免页面声称已撤而券商端仍在成交。
+    if cur in (OrderState.SUBMITTED, OrderState.PARTIALLY_FILLED, OrderState.UNKNOWN):
+        if broker is None:
+            raise TradingError("券商连接不可用，无法确认撤单")
         try:
-            broker.cancel(order.get("broker_order_id"))
-        except Exception:  # noqa: BLE001 — broker.cancel 失败不阻塞本地撤单标记
-            logger.warning("broker.cancel 失败 (继续标 CANCELLED)", exc_info=True)
+            result = broker.cancel(order.get("broker_order_id")) or {}
+        except Exception as exc:
+            logger.warning("broker.cancel 失败", exc_info=True)
+            raise TradingError(f"券商撤单失败: {exc}") from exc
+        if not result.get("success"):
+            raise TradingError(str(result.get("error") or result.get("reason") or "券商未接受撤单"))
+        if result.get("confirmed") is not True:
+            event = "reconcile_unknown" if cur == OrderState.UNKNOWN else "report_unknown"
+            new_state = transition(cur, event)
+            store.update_order_state(
+                data_dir, order_id, new_state.value,
+                event_from_state=cur.value,
+                event_reason="cancel_accepted_pending_confirmation",
+            )
+            return {
+                "order_id": order_id,
+                "state": new_state.value,
+                "pending_confirmation": True,
+            }
+        event = "reconcile_cancelled" if cur == OrderState.UNKNOWN else "cancel"
+        new_state = transition(cur, event)
+        store.update_order_state(
+            data_dir, order_id, new_state.value,
+            event_from_state=cur.value, event_reason="broker_cancel_confirmed",
+        )
+        return {"order_id": order_id, "state": new_state.value}
 
     new_state = transition(cur, "cancel")
     store.update_order_state(
@@ -374,7 +521,8 @@ def on_broker_callback(data_dir: Path, exec_row: dict) -> dict:
     total_qty = int(order["qty"])
 
     if new_filled >= total_qty:
-        new_state = transition(cur_state, "full_fill")
+        event = "reconcile_filled" if cur_state == OrderState.UNKNOWN else "full_fill"
+        new_state = transition(cur_state, event)
         store.update_order_state(
             data_dir, order["order_id"], new_state.value,
             filled_qty=new_filled,
@@ -382,7 +530,8 @@ def on_broker_callback(data_dir: Path, exec_row: dict) -> dict:
             event_from_state=cur_state.value, event_reason="full_fill",
         )
     else:
-        new_state = transition(cur_state, "partial_fill")
+        event = "reconcile_partial" if cur_state == OrderState.UNKNOWN else "partial_fill"
+        new_state = transition(cur_state, event)
         store.update_order_state(
             data_dir, order["order_id"], new_state.value,
             filled_qty=new_filled,
@@ -448,7 +597,7 @@ def trigger_reconciliation(
     data_dir: Path,
     account_id: str,
     broker_orders: list[dict],
-    broker_positions: list[dict],
+    broker_positions: list[dict] | None,
     broker_cash: float | None,
 ) -> dict:
     """触发对账 (由调用方注入 broker 报告)."""
@@ -459,6 +608,11 @@ def trigger_reconciliation(
     if result["status"] == "dirty":
         # 脏对账 → 切回 DISARMED (但保留已挂单, 不自动撤)
         store.set_account_mode(data_dir, account_id, TradingMode.DEGRADED.value)
+    else:
+        acc = store.get_account(data_dir, account_id)
+        if acc is not None and acc["mode"] == TradingMode.DEGRADED.value:
+            # 恢复后仍需人工重新 Arm，不能自动恢复可报单状态。
+            store.set_account_mode(data_dir, account_id, TradingMode.DISARMED.value)
     return result
 
 

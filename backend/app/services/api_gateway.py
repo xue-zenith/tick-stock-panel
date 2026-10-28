@@ -60,6 +60,7 @@ _RULES: list[tuple[str, str, str]] = [
     ("*", "/api/paper", "paper:trade"),
     # live — 实盘交易按蓝图 §14 拆分权限
     # live:read 读取类 (账户/订单/成交/审批/健康/对账/调度器/授权)
+    ("GET", "/api/live/brokers", "live:read"),
     ("GET", "/api/live/accounts", "live:read"),
     ("GET", "/api/live/orders", "live:read"),
     ("GET", "/api/live/executions", "live:read"),

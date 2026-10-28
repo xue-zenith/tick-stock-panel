@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import queue
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from app.custom.live_trading.routes import build_router
 from app.trading import store
+from app.trading.brokers import registry as broker_registry
 
 
 @pytest.fixture()
@@ -26,6 +28,13 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _reset_broker_instances():
+    broker_registry.clear_instances()
+    yield
+    broker_registry.clear_instances()
+
+
 def test_create_and_list_accounts(client: TestClient):
     r = client.post("/api/live/accounts", json={
         "account_id": "acc1", "broker": "mock", "display_name": "主账户",
@@ -35,6 +44,58 @@ def test_create_and_list_accounts(client: TestClient):
     r2 = client.get("/api/live/accounts")
     assert r2.status_code == 200
     assert any(a["account_id"] == "acc1" for a in r2.json()["accounts"])
+
+
+def test_broker_catalog_and_unknown_broker_rejected(client: TestClient):
+    catalog = client.get("/api/live/brokers")
+    assert catalog.status_code == 200
+    assert any(row["name"] == "mock" and row["registered"] for row in catalog.json()["brokers"])
+    mock = next(row for row in catalog.json()["brokers"] if row["name"] == "mock")
+    assert mock["capabilities"]["supports_partial_fills"] is True
+    assert mock["capabilities"]["supports_cancel_confirmation"] is True
+
+    r = client.post("/api/live/accounts", json={
+        "account_id": "acc1", "broker": "not-installed", "display_name": "主账户",
+    })
+    assert r.status_code == 400
+    assert "未注册" in r.json()["detail"]
+
+
+def test_broker_catalog_shows_real_vendor_setup_requirements(client: TestClient):
+    rows = client.get("/api/live/brokers").json()["brokers"]
+    by_name = {row["name"]: row for row in rows}
+    for name in ("qmt", "futu", "ibkr"):
+        row = by_name[name]
+        assert row["registered"] is False
+        assert row["available"] is False
+        assert row["requires_sdk"] is True
+        assert row["requires_account_env"] is True
+        assert row["requires_vendor_api"] is True
+        assert row["requirements"]
+
+    custom = client.get("/api/live/brokers").json()["custom_integration"]
+    assert custom["status"] == "extension_required"
+    assert len(custom["steps"]) >= 3
+
+    # 展示位不能绕过 fail-closed 账户创建校验。
+    response = client.post("/api/live/accounts", json={
+        "account_id": "qmt1", "broker": "qmt", "display_name": "QMT",
+    })
+    assert response.status_code == 400
+
+
+def test_connect_account_persists_broker_snapshots(client: TestClient):
+    client.post("/api/live/accounts", json={
+        "account_id": "acc1", "broker": "mock", "display_name": "主账户",
+    })
+    r = client.post("/api/live/accounts/acc1/connect")
+    assert r.status_code == 200
+    assert r.json()["broker_status"]["connected"] is True
+
+    detail = client.get("/api/live/accounts/acc1").json()
+    assert detail["snapshot"]["cash"] == 1_000_000
+    health = client.get("/api/live/health?account=acc1").json()
+    assert health["broker_status"]["connected"] is True
 
 
 def test_arm_requires_clean_reconciliation(client: TestClient, tmp_path: Path):
@@ -82,6 +143,20 @@ def test_full_arm_recon_submit_flow(client: TestClient, tmp_path: Path):
     assert r.status_code == 200
     assert len(r.json()["approvals"]) == 1
 
+    approval_id = r.json()["approvals"][0]["approval_id"]
+    r = client.post(f"/api/live/approvals/{approval_id}/approve")
+    assert r.status_code == 200
+    assert r.json()["state"] == "submitted"
+    assert r.json()["broker_order_id"].startswith("bk_")
+
+
+def test_reconciliation_without_adapter_fails_closed(client: TestClient, tmp_path: Path):
+    # 模拟历史数据库里遗留了已卸载的适配器账户。不能拿空列表伪造 clean。
+    store.create_account(tmp_path, "legacy", "removed-broker", "旧账户")
+    r = client.post("/api/live/reconciliation/run?account=legacy")
+    assert r.status_code == 503
+    assert store.list_recon_runs(tmp_path, "legacy") == []
+
 
 def test_disarm(client: TestClient):
     client.post("/api/live/accounts", json={
@@ -119,10 +194,50 @@ def test_limit_order_rejected_without_quote_snapshot(client: TestClient, tmp_pat
     assert "行情" in r.json()["detail"]
 
 
+def test_next_open_uses_daily_reference_without_realtime(client: TestClient, tmp_path: Path):
+    """盘后单不要求实时快照，但必须用本地 raw close 完成金额风控。"""
+    import polars as pl
+
+    class _Repo:
+        store = SimpleNamespace(data_dir=tmp_path)
+
+        @staticmethod
+        def resolve_asset_type(symbol):
+            return "stock"
+
+        @staticmethod
+        def get_daily_asset(asset_type, symbol, start, end, columns=None):
+            return pl.DataFrame({
+                "date": [end], "raw_close": [10.0], "close": [10.0],
+            })
+
+    client.app.state.repo = _Repo()
+    client.post("/api/live/accounts", json={
+        "account_id": "acc1", "broker": "mock", "display_name": "主",
+    })
+    client.post("/api/live/accounts/acc1/connect")
+    client.post("/api/live/reconciliation/run?account=acc1")
+    client.post("/api/live/arm?account=acc1")
+    r = client.post("/api/live/orders", json={
+        "account_id": "acc1", "symbol": "600000.SH", "side": "buy", "qty": 100,
+        "price_policy": "next_open", "limit_price": None,
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["verdict"] == "pass"
+
+
+def test_order_validation_rejects_non_positive_qty(client: TestClient):
+    r = client.post("/api/live/orders", json={
+        "account_id": "acc1", "symbol": "600000.SH", "side": "buy", "qty": -100,
+        "price_policy": "next_open",
+    })
+    assert r.status_code == 422
+
+
 def test_limit_order_passes_with_quote_snapshot(client: TestClient, tmp_path: Path):
     """limit 单在有行情快照时正常提交 (注入 mock quote_service)."""
-    from types import SimpleNamespace
     import polars as pl
+
     from app.trading import store
 
     class _MockQuoteSvc:
@@ -191,7 +306,7 @@ def test_events_publish_live_trading_type(client: TestClient, tmp_path: Path):
             if ev.get("type") == "live_trading":
                 found = True
                 break
-        except Exception:
+        except queue.Empty:
             break
     bus.unsubscribe(q)
     assert found, "未收到 live_trading 类型事件"
@@ -203,7 +318,8 @@ def test_autonomy_l1_rejects_l2(client: TestClient):
         "account_id": "acc1", "broker": "mock", "display_name": "主",
     })
     r = client.post("/api/live/autonomy", json={
-        "strategy_id": "s1", "level": 2, "max_order_value": 1000,
+        "account_id": "acc1", "strategy_id": "s1", "level": 2,
+        "max_order_value": 1000,
     })
     assert r.status_code == 400
 
@@ -213,9 +329,10 @@ def test_autonomy_l1_create_and_revoke(client: TestClient):
         "account_id": "acc1", "broker": "mock", "display_name": "主",
     })
     r = client.post("/api/live/autonomy", json={
-        "strategy_id": "s1", "level": 1,
+        "account_id": "acc1", "strategy_id": "s1", "level": 1,
     })
     assert r.status_code == 200
+    assert r.json()["grant"]["account_id"] == "acc1"
     grant_id = r.json()["grant"]["grant_id"]
     r = client.post(f"/api/live/autonomy/{grant_id}/revoke")
     assert r.status_code == 200
@@ -295,8 +412,8 @@ def test_orders_pagination(client: TestClient, tmp_path: Path):
             "INSERT INTO trade_intents(intent_id, account_id, symbol, side, qty,"
             " price_policy, tif, source, dedupe_key, proposed_at, ruleset_version, rationale, status)"
             " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'approved')",
-            (f"int_{i}", "acc1", "600000.SH", "buy", 100, "limit", "day", "manual",
-             f"dk_{i}", "2026-10-21T10:00:00+08:00", "v1", "测试"),
+            (f"int_{_i}", "acc1", "600000.SH", "buy", 100, "limit", "day", "manual",
+             f"dk_{_i}", "2026-10-21T10:00:00+08:00", "v1", "测试"),
         ))
         store.insert_order(tmp_path, {
             "order_id": f"ord_{i}", "broker_order_id": None,

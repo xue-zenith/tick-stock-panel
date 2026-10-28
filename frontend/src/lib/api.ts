@@ -1119,6 +1119,48 @@ export interface LiveAccount {
   created_at: string
 }
 
+export interface LiveBroker {
+  name: string
+  label: string
+  kind: 'real' | 'simulation' | string
+  registered: boolean
+  available?: boolean
+  setup_status?: 'ready' | 'sdk_required' | 'adapter_required' | string
+  requires_sdk?: boolean
+  requires_account_env?: boolean
+  requires_vendor_api?: boolean
+  requirements?: string[]
+  capabilities?: LiveBrokerCapabilities
+}
+
+export interface LiveBrokerCatalogResponse {
+  brokers: LiveBroker[]
+  custom_integration?: {
+    status: string
+    title: string
+    steps: string[]
+  }
+}
+
+export interface LiveBrokerCapabilities {
+  asset_types: string[]
+  time_in_force: string[]
+  supports_market_orders: boolean
+  supports_partial_fills: boolean
+  supports_cancel_confirmation: boolean
+  supports_push_callbacks: boolean
+  callback_signature: string | null
+}
+
+export interface LiveBrokerStatus {
+  broker: string
+  registered: boolean
+  connected: boolean
+  latency_ms: number | null
+  error: string | null
+  capabilities?: LiveBrokerCapabilities
+}
+
 export interface LiveAccountSnapshot {
   account_id: string
   as_of: string
@@ -1241,6 +1283,7 @@ export interface LiveSystemEvent {
 
 export interface LiveAutonomyGrant {
   grant_id: string
+  account_id: string
   strategy_id: string
   level: number
   max_order_value: number
@@ -4424,11 +4467,20 @@ export const api = {
   liveAccounts: () =>
     request<{ accounts: LiveAccount[] }>('/api/live/accounts'),
 
+  liveBrokers: () =>
+    request<LiveBrokerCatalogResponse>('/api/live/brokers'),
+
   liveCreateAccount: (body: { account_id: string; broker?: string; display_name?: string }) =>
     request<{ account: LiveAccount }>('/api/live/accounts', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  liveConnectAccount: (accountId: string) =>
+    request<{ account: LiveAccount; broker_status: LiveBrokerStatus }>(
+      `/api/live/accounts/${encodeURIComponent(accountId)}/connect`,
+      { method: 'POST' },
+    ),
 
   liveAccountDetail: (accountId: string) =>
     request<{ account: LiveAccount; snapshot: LiveAccountSnapshot | null; positions: LivePosition[] }>(
@@ -4471,7 +4523,7 @@ export const api = {
     request<{ approvals: LiveApprovalRow[] }>('/api/live/approvals'),
 
   liveApprove: (id: string) =>
-    request<{ order_id: string; approval_id: string; state: string }>(
+    request<{ order_id: string; approval_id: string; state: string; broker_order_id?: string | null; reason?: string }>(
       `/api/live/approvals/${encodeURIComponent(id)}/approve`, { method: 'POST' },
     ),
 
@@ -4481,7 +4533,7 @@ export const api = {
     ),
 
   liveHealth: (account?: string) =>
-    request<{ accounts?: LiveAccount[]; account?: string; mode?: string; unresolved_diffs?: number; recent_runs?: LiveReconRun[]; recent_events?: LiveSystemEvent[] }>(
+    request<{ accounts?: LiveAccount[]; account?: string; mode?: string; unresolved_diffs?: number; recent_runs?: LiveReconRun[]; recent_events?: LiveSystemEvent[]; broker_status?: LiveBrokerStatus }>(
       account ? `/api/live/health?account=${encodeURIComponent(account)}` : '/api/live/health',
     ),
 
@@ -4506,7 +4558,7 @@ export const api = {
   liveAutonomy: () =>
     request<{ grants: LiveAutonomyGrant[] }>('/api/live/autonomy'),
 
-  liveCreateAutonomy: (body: { strategy_id: string; level: number; max_order_value?: number }) =>
+  liveCreateAutonomy: (body: { account_id: string; strategy_id: string; level: number; max_order_value?: number }) =>
     request<{ grant: LiveAutonomyGrant }>('/api/live/autonomy', {
       method: 'POST', body: JSON.stringify(body),
     }),

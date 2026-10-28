@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 import pkgutil
 from dataclasses import dataclass
@@ -101,6 +102,25 @@ def start_backend_extensions(
                 startup(context)
         except Exception as exc:
             logger.warning("backend extension startup failed %s: %s", module_name, exc)
+
+
+async def stop_backend_extensions(
+    context: ExtensionContext,
+    registry: BackendExtensionRegistry,
+) -> None:
+    """按逆序停止已启动扩展；同步与 async shutdown 均支持并隔离失败。"""
+    for module_name in reversed(_custom_module_names()):
+        try:
+            module = importlib.import_module(module_name)
+            if getattr(module, "EXTENSION_ID", None) not in registry.extension_ids():
+                continue
+            shutdown = getattr(module, "shutdown", None)
+            if callable(shutdown):
+                result = shutdown(context)
+                if inspect.isawaitable(result):
+                    await result
+        except Exception as exc:
+            logger.warning("backend extension shutdown failed %s: %s", module_name, exc)
 
 
 def current_extension_context(*, data_dir, repository) -> ExtensionContext:

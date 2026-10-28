@@ -211,7 +211,7 @@ ssh -L 3018:127.0.0.1:3018 root@123.45.67.89
 
 ## 实盘交易模块
 
-面板内置实盘交易模块（侧栏「实盘」入口），与模拟盘（`/api/paper/*`）严格隔离。实盘交易走独立的 `app/trading` 域模块 + `/api/live/*` 端点，使用 SQLite WAL 存储（`data/live_trading.db`），不触碰模拟盘的 `fills.jsonl`。
+面板内置实盘交易模块（侧栏「实盘」入口），与模拟盘（`/api/paper/*`）严格隔离。实盘交易走独立的 `app/trading` 域模块 + `/api/live/*` 端点，使用 SQLite WAL 存储（`data/live_trading/oms.db`），不触碰模拟盘的 `fills.jsonl`。
 
 ### 安全模型
 
@@ -232,7 +232,7 @@ ssh -L 3018:127.0.0.1:3018 root@123.45.67.89
 | `live:read` | GET accounts/orders/executions/approvals/health/reconciliation/scheduler/autonomy |
 | `live:propose` | POST /api/live/orders（提交交易意图） |
 | `live:approve` | POST /api/live/approvals/*, DELETE /api/live/orders/*（审批 + 撤单） |
-| `live:admin` | POST accounts/arm/disarm/reconciliation/run/scheduler/run-now/autonomy |
+| `live:admin` | POST accounts、accounts/*/connect、arm/disarm、reconciliation/run、scheduler/run-now、autonomy |
 
 ### 实时推送
 
@@ -240,10 +240,42 @@ ssh -L 3018:127.0.0.1:3018 root@123.45.67.89
 
 ### 券商适配器
 
-当前默认注册 MockBroker（内存测试适配器，默认 100 万初始资金），用于端到端验证 OMS 闭环。真实券商适配器（XtQuant/QMT、Futu、IBKR）需实现 `BrokerAdapter` 协议（`backend/app/trading/brokers/base.py`）后在扩展 startup 时注册。未注册适配器的账户对账走空对账路径。
+仓库只内置 MockBroker（内存安全演练适配器，默认 100 万初始资金），用于验证 OMS 闭环，**不能连接真实资金账户**。页面只展示当前进程实际注册的适配器，不再把 QMT、Futu、IBKR 等未安装实现显示成“可连接”。
+
+真实券商需实现 `BrokerAdapter` 协议（`backend/app/trading/brokers/base.py`），完成券商字段/状态映射、凭据读取、连接、资金/持仓/委托/成交查询、报单、撤单和回调绑定，再在扩展 `startup` 中注册：
+
+```python
+from app.trading.brokers.policies import BrokerCapabilities
+from app.trading.brokers.registry import register
+
+def startup(context) -> None:
+    del context
+    register(
+        "company_qmt",
+        lambda account_id: CompanyQmtAdapter(account_id),
+        label="公司 QMT",
+        kind="real",
+        capabilities=BrokerCapabilities(
+            asset_types=("stock", "etf"),
+            time_in_force=("day",),
+            supports_partial_fills=True,
+            supports_cancel_confirmation=True,
+            supports_push_callbacks=True,
+            callback_signature="qmt-session",
+        ),
+    )
+```
+
+真实适配器还必须实现 `normalize_order(row)`，把厂商状态严格映射为平台状态；无法识别的新状态必须返回 `unknown`，不得猜测为已报或已撤。`validate_order(order)` 用于实现该券商的交易时段、市场、订单类型和 TIF 预检。平台只在 `cancel()` 返回 `success=true, confirmed=true` 时落本地 `cancelled`；仅受理未确认时转为 `unknown` 并等待对账。部分成交按券商成交编号幂等累计。
+
+HTTP/WebSocket 回调应在适配器边界完成厂商要求的签名校验后才能调用 OMS。仓库提供 `HmacSha256CallbackVerifier` 作为 HMAC-SHA256 + 时间窗防重放构件；使用其他签名算法的券商应实现等价的常量时间验签。回调密钥和交易凭据均不得进入前端或 OMS 数据库。
+
+凭据应由适配器从操作系统密钥库、环境变量或独立密钥服务读取，不写入 Git、浏览器或 OMS 数据库。未注册、构造失败、连接失败、快照不完整时，创建/连接/对账/Arm 均 fail-closed；系统不会再用空列表伪造 clean 对账。
+
+连接顺序为：创建账户 → `POST /api/live/accounts/{id}/connect` → 拉取并落库资金/持仓/成交 → clean 对账 → 人工 Arm。审批通过后会再次执行最新风控并立即送达该账户的已连接适配器；撤单只有获得券商成功确认后才更新为 `CANCELLED`。
 
 ### 部署注意事项
 
-- **数据隔离**：`data/live_trading.db` 是实盘账本，包含意图/审批/风控/回报/审计，不与模拟盘数据混用
+- **数据隔离**：`data/live_trading/oms.db` 是实盘账本，包含意图/审批/风控/回报/审计，不与模拟盘数据混用
 - **对账调度器**：后台 asyncio 任务，启动即跑一次 boot reconcile，之后按 30s（订单）/60s（持仓）/15:05（日终）周期对账
-- **首次使用**：创建账户 → 手动对账（或等调度器）→ Arm → 提交意图（next_open 策略可绕开交易时段限制）→ 审批 → 成交
+- **首次使用**：安装并注册真实适配器 → 创建账户 → 连接 → 手动对账（或等调度器）→ Arm → 提交意图 → 审批并送单 → 券商回报/对账确认

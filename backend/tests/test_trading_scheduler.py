@@ -69,7 +69,7 @@ async def test_boot_reconcile_runs_on_start(d: Path):
 
 @pytest.mark.asyncio
 async def test_no_adapter_skips_account(d: Path):
-    """无注册适配器的 broker 跳过 (不报错, 不写差异)。"""
+    """无注册适配器时不生成伪对账结果，并记录连接失败事件。"""
     scheduler._scheduler = None
     store.create_account(d, "acc1", "nonexistent_broker", "主")
     s = scheduler.start_scheduler(d, orders_interval_s=0.05, positions_interval_s=0.05)
@@ -78,8 +78,28 @@ async def test_no_adapter_skips_account(d: Path):
     events = store.recent_system_events(d, limit=10)
     kinds = [e["kind"] for e in events]
     assert "scheduled_reconcile" not in kinds
+    assert "scheduled_reconcile_failed" in kinds
     await s.shutdown()
     scheduler._scheduler = None
+
+
+def test_reregister_disconnects_cached_alias_even_if_adapter_name_differs():
+    class _AliasAdapter(MockBrokerAdapter):
+        @property
+        def name(self) -> str:
+            return "sdk-internal-name"
+
+    adapter = _AliasAdapter(account_id="acc1")
+    adapter.connect()
+    broker_registry.register("company-alias", lambda _account_id: adapter)
+    assert broker_registry.get_adapter("company-alias", "acc1") is adapter
+
+    broker_registry.register(
+        "company-alias", lambda account_id: _AliasAdapter(account_id=account_id),
+    )
+
+    assert adapter.health()["connected"] is False
+    broker_registry.unregister("company-alias")
 
 
 @pytest.mark.asyncio

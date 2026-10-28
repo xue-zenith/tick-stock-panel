@@ -75,6 +75,7 @@ def evaluate(intent: TradeIntent, ctx: RiskContext) -> tuple[str, tuple[str, ...
     reasons 列出所有 REJECT 规则的原因 (供 UI 与审计展示)。
     """
     checks: list[CheckResult] = [
+        _check_positive_qty(intent, ctx),
         _check_mode_armed(intent, ctx),
         _check_autonomy_scope(intent, ctx),
         _check_lot_size(intent, ctx),
@@ -92,6 +93,17 @@ def evaluate(intent: TradeIntent, ctx: RiskContext) -> tuple[str, tuple[str, ...
 
 
 # ── 系统级 ───────────────────────────────────────────────
+def _check_positive_qty(intent: TradeIntent, ctx: RiskContext) -> CheckResult:
+    del ctx
+    if intent.qty <= 0:
+        return CheckResult("positive_qty", RiskVerdict.REJECT, "委托数量必须大于 0")
+    if intent.limit_price is not None and intent.limit_price <= 0:
+        return CheckResult("positive_price", RiskVerdict.REJECT, "委托价格必须大于 0")
+    if intent.price_policy == "limit" and intent.limit_price is None:
+        return CheckResult("limit_price_required", RiskVerdict.REJECT, "限价单缺少限价")
+    return CheckResult("positive_qty", RiskVerdict.PASS)
+
+
 def _check_mode_armed(intent: TradeIntent, ctx: RiskContext) -> CheckResult:
     """DISARMED/HALTED 拒单; DEGRADED 仅允许 SELL (减仓)."""
     if ctx.mode in (TradingMode.DISARMED, TradingMode.HALTED):

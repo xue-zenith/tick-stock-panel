@@ -8,12 +8,15 @@ HTTPException 包裹 ValueError。api_gateway 规则表按 live:read / live:prop
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.trading import autonomy, oms, store
+from app.market_time import cn_today
+from app.trading import autonomy, broker_service, oms, store
 from app.trading.contracts import TradingMode
 
 logger = logging.getLogger(__name__)
@@ -47,57 +50,140 @@ def _fetch_quote_snapshot(request: Request, symbol: str) -> dict:
     """
     try:
         svc = getattr(request.app.state, "quote_service", None)
-        if svc is None:
-            return {}
-        df, _ = svc.get_enriched_today()
-        if df is None or df.is_empty() or "symbol" not in df.columns:
-            return {}
-        row = df.filter(df["symbol"] == symbol)
-        if row.is_empty():
-            return {}
-        r = row.row(0, named=True)
-        result: dict[str, float | None] = {}
-        # enriched 的 close 即最新价 (CONTRIBUTING.md §3.2)
-        import contextlib
-        for col in ("close", "limit_up_price", "limit_down_price", "prev_close"):
-            val = r.get(col)
-            if val is not None:
-                with contextlib.suppress(TypeError, ValueError):
-                    result["last_price" if col == "close" else col] = float(val)
-        return result
+        if svc is not None:
+            df, _ = svc.get_enriched_today()
+            if df is not None and not df.is_empty() and "symbol" in df.columns:
+                row = df.filter(df["symbol"] == symbol)
+                if not row.is_empty():
+                    r = row.row(0, named=True)
+                    result: dict[str, float | bool | None] = {"is_realtime": True}
+                    # enriched 的 close 即最新价 (CONTRIBUTING.md §3.2)
+                    import contextlib
+                    for col in ("close", "limit_up_price", "limit_down_price", "prev_close"):
+                        val = r.get(col)
+                        if val is not None:
+                            with contextlib.suppress(TypeError, ValueError):
+                                result["last_price" if col == "close" else col] = float(val)
+                    if result.get("last_price") is not None:
+                        return result
     except Exception:  # noqa: BLE001 — 行情快照失败不阻塞下单, fail-closed 由风控处理
         logger.warning("_fetch_quote_snapshot failed for %s", symbol, exc_info=True)
-        return {}
+
+    # 盘后单仍需一个可靠参考价做金额/仓位预检，但不能把日线价冒充实时价。
+    try:
+        repo = request.app.state.repo
+        asset_type = repo.resolve_asset_type(symbol)
+        end = cn_today()
+        df = repo.get_daily_asset(
+            asset_type, symbol, end - timedelta(days=30), end,
+            columns=["date", "raw_close", "close"],
+        )
+        if df is not None and not df.is_empty():
+            row = df.sort("date").row(-1, named=True)
+            price = row.get("raw_close") or row.get("close")
+            if price is not None:
+                return {"last_price": float(price), "is_realtime": False}
+    except Exception:  # noqa: BLE001 — 无日线参考价时由风控 fail-closed
+        logger.warning("daily reference price failed for %s", symbol, exc_info=True)
+    return {"is_realtime": False}
+
+
+def _build_risk_ctx(request: Request, intent: dict, account: dict):
+    """用最新券商快照、持仓和行情重建风控上下文。"""
+    from app.trading import risk as risk_mod
+
+    d = _data_dir(request)
+    account_id = intent["account_id"]
+    snap = store.latest_account_snapshot(d, account_id) or {}
+    positions = {
+        row["symbol"]: row for row in store.latest_positions(d, account_id)
+    }
+    position = positions.get(intent["symbol"], {})
+    quote = _fetch_quote_snapshot(request, intent["symbol"])
+    repo = getattr(request.app.state, "repo", None)
+    try:
+        asset_type = repo.resolve_asset_type(intent["symbol"]) if repo is not None else "stock"
+    except Exception:  # noqa: BLE001 — 不确定时按股票严格规则处理
+        asset_type = "stock"
+    level = (
+        autonomy.effective_level(d, account_id, intent.get("strategy_id") or "")
+        if intent.get("source") == "ai_l1" else 0
+    )
+    return risk_mod.build_ctx(
+        account_id=account_id,
+        mode=TradingMode(account.get("mode", "disarmed")),
+        cash=snap.get("cash", 0),
+        total=snap.get("total", 0),
+        last_price=quote.get("last_price"),
+        prev_close=quote.get("prev_close"),
+        limit_up_price=quote.get("limit_up_price"),
+        limit_down_price=quote.get("limit_down_price"),
+        position_qty=int(position.get("qty") or 0),
+        available_qty=int(position.get("available_qty") or 0),
+        asset_type=asset_type,
+        autonomy_level=level,
+    ), quote
 
 
 # ── Pydantic 模型 ────────────────────────────────────────
 class CreateAccountModel(BaseModel):
-    account_id: str
-    broker: str = "mock"
-    display_name: str = "实盘账户"
+    account_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
+    broker: str = Field(default="mock", min_length=1, max_length=64, pattern=r"^[a-z0-9_.-]+$")
+    display_name: str = Field(default="实盘账户", min_length=1, max_length=80)
 
 
 class IntentModel(BaseModel):
     account_id: str
-    symbol: str
-    side: str                # buy / sell
-    qty: int
-    price_policy: str = "limit"   # limit / market / next_open / close
-    limit_price: float | None = None
-    tif: str = "day"
-    source: str = "manual"        # manual / ai_l1
+    symbol: str = Field(pattern=r"^[0-9]{6}\.(SH|SZ|BJ)$")
+    side: Literal["buy", "sell"]
+    qty: int = Field(gt=0)
+    price_policy: Literal["limit", "market", "next_open", "close"] = "limit"
+    limit_price: float | None = Field(default=None, gt=0)
+    tif: Literal["day", "gtc", "ioc", "fok"] = "day"
+    source: Literal["manual", "ai_l1"] = "manual"
     strategy_id: str | None = None
     rationale: str = ""
     dedupe_key: str | None = None
 
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value):
+        return str(value).strip().upper()
+
+    @model_validator(mode="after")
+    def validate_policy(self):
+        if self.price_policy == "limit" and self.limit_price is None:
+            raise ValueError("限价单必须提供 limit_price")
+        if self.source == "ai_l1" and not self.strategy_id:
+            raise ValueError("AI_L1 意图必须提供 strategy_id")
+        return self
+
 
 class CreateGrantModel(BaseModel):
+    account_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
     strategy_id: str
     level: int = 1
     max_order_value: float = 0.0
 
 
 def _register(router: APIRouter) -> None:
+
+    @router.get("/brokers")
+    def list_brokers():
+        """返回已加载适配器及厂商接入要求，避免把未安装 SDK 伪装成可交易。"""
+        return {
+            "brokers": broker_service.catalog(),
+            "custom_integration": {
+                "status": "extension_required",
+                "title": "自定义券商适配器",
+                "steps": [
+                    "实现 BrokerAdapter：连接、健康检查、下单、撤单确认、订单/成交查询",
+                    "按券商规则实现状态枚举、部分成交、交易时段和回调验签",
+                    "在部署启动阶段 register('your_broker', factory, capabilities=...)",
+                    "配置密钥到部署环境，连接后先完成一次全量对账再启用交易",
+                ],
+            },
+        }
 
     # ── 账户 ─────────────────────────────
     @router.get("/accounts")
@@ -108,6 +194,14 @@ def _register(router: APIRouter) -> None:
     @router.post("/accounts")
     def create_account(request: Request, body: CreateAccountModel):
         store.init_db(_data_dir(request))
+        if not any(
+            row["name"] == body.broker and row.get("registered") is True
+            for row in broker_service.catalog()
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"券商适配器 {body.broker!r} 未注册或未安装",
+            )
         try:
             acc = store.create_account(
                 _data_dir(request),
@@ -117,6 +211,26 @@ def _register(router: APIRouter) -> None:
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return {"account": acc}
+
+    @router.post("/accounts/{account_id}/connect")
+    def connect_account(request: Request, account_id: str):
+        d = _data_dir(request)
+        store.init_db(d)
+        acc = store.get_account(d, _acc_validator(account_id))
+        if acc is None:
+            raise HTTPException(status_code=404, detail="账户不存在")
+        try:
+            adapter = broker_service.connect(d, acc["broker"], account_id)
+            pulled = broker_service.pull(adapter)
+            # 新账户建立风控基线；已有快照必须先对账，不能用 reconnect 静默覆盖差异。
+            if store.latest_account_snapshot(d, account_id) is None:
+                broker_service.persist_snapshot(d, account_id, acc["mode"], pulled)
+        except (broker_service.BrokerUnavailableError, broker_service.BrokerSyncError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return {
+            "account": store.get_account(d, account_id),
+            "broker_status": broker_service.status(acc["broker"], account_id),
+        }
 
     @router.get("/accounts/{account_id}")
     def get_account(request: Request, account_id: str):
@@ -156,30 +270,19 @@ def _register(router: APIRouter) -> None:
         acc = store.get_account(d, body.account_id)
         if acc is None:
             raise HTTPException(status_code=404, detail="账户不存在")
-        snap = store.latest_account_snapshot(d, body.account_id) or {}
-        mode = TradingMode(acc.get("mode", "disarmed"))
-        # 行情快照: 从平台 enriched 缓存取标的实时价格 + 涨跌停判定价
-        quote = _fetch_quote_snapshot(request, body.symbol)
+        try:
+            broker_service.require_connected(d, acc["broker"], body.account_id)
+        except broker_service.BrokerUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        intent_payload = body.model_dump()
+        ctx, quote = _build_risk_ctx(request, intent_payload, acc)
         # fail-closed: limit/market 单需要实时行情; 行情不可用时拒绝 (蓝图 §10.1)
         # NEXT_OPEN/CLOSE 是盘后管道, 不依赖盘中行情
-        if body.price_policy in ("limit", "market") and quote.get("last_price") is None:
+        if body.price_policy in ("limit", "market") and not quote.get("is_realtime"):
             raise HTTPException(
                 status_code=400,
                 detail="实时行情不可用, 无法校验价格 (limit/market 单需要实时行情快照)",
             )
-        from app.trading import risk as risk_mod
-        ctx = risk_mod.build_ctx(
-            account_id=body.account_id,
-            mode=mode,
-            cash=snap.get("cash", 0),
-            total=snap.get("total", 0),
-            last_price=quote.get("last_price"),
-            prev_close=quote.get("prev_close"),
-            limit_up_price=quote.get("limit_up_price"),
-            limit_down_price=quote.get("limit_down_price"),
-            position_qty=0,
-            available_qty=store.available_qty(d, body.account_id, body.symbol),
-        )
         try:
             result = oms.submit_intent(
                 d,
@@ -198,8 +301,22 @@ def _register(router: APIRouter) -> None:
     def cancel_order(request: Request, order_id: str):
         d = _data_dir(request)
         store.init_db(d)
+        order = store.get_order(d, order_id)
+        if order is None:
+            raise HTTPException(status_code=404, detail="订单不存在")
+        acc = store.get_account(d, order["account_id"])
+        adapter = None
+        if order["state"] in ("submitted", "partially_filled", "unknown"):
+            if acc is None:
+                raise HTTPException(status_code=400, detail="订单账户不存在")
+            try:
+                adapter = broker_service.require_connected(
+                    d, acc["broker"], order["account_id"],
+                )
+            except broker_service.BrokerUnavailableError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
         try:
-            result = oms.cancel(d, order_id)
+            result = oms.cancel(d, order_id, adapter)
         except oms.TradingError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         return result
@@ -246,8 +363,26 @@ def _register(router: APIRouter) -> None:
         ap = store.get_approval(d, approval_id)
         if ap is None:
             raise HTTPException(status_code=404, detail="审批记录不存在")
+        intent = store.get_intent(d, ap["intent_id"])
+        if intent is None:
+            raise HTTPException(status_code=404, detail="交易意图不存在")
+        acc = store.get_account(d, intent["account_id"])
+        if acc is None:
+            raise HTTPException(status_code=404, detail="账户不存在")
         try:
-            return oms.approve(d, ap["intent_id"])
+            adapter = broker_service.require_connected(
+                d, acc["broker"], intent["account_id"],
+            )
+        except broker_service.BrokerUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        try:
+            fresh_acc = store.get_account(d, intent["account_id"]) or acc
+            risk_ctx, quote = _build_risk_ctx(request, intent, fresh_acc)
+            if intent["price_policy"] in ("limit", "market") and not quote.get("is_realtime"):
+                raise oms.TradingError("实时行情不可用，审批时无法重新校验价格")
+            approved = oms.approve(d, ap["intent_id"], risk_ctx=risk_ctx)
+            submitted = oms.submit_to_broker(d, approved["order_id"], adapter)
+            return {**approved, **submitted}
         except oms.TradingError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -278,6 +413,7 @@ def _register(router: APIRouter) -> None:
                 "unresolved_diffs": store.unresolved_diff_count(d, account),
                 "recent_runs": store.list_recon_runs(d, account)[:5],
                 "recent_events": store.recent_system_events(d, limit=20),
+                "broker_status": broker_service.status(acc["broker"], account),
             }
         return {
             "accounts": store.list_accounts(d),
@@ -315,30 +451,31 @@ def _register(router: APIRouter) -> None:
 
     @router.post("/reconciliation/run")
     def trigger_reconciliation(request: Request, account: str = Query(...)):
-        """手动触发对账: 优先用已注册 broker 适配器拉取真实状态, 无适配器则空对账。"""
+        """手动触发真实对账；未注册、断线或任一快照失败都返回 503。"""
         d = _data_dir(request)
         store.init_db(d)
         acc = store.get_account(d, account)
         if acc is None:
             raise HTTPException(status_code=404, detail="账户不存在")
-        broker_name = acc["broker"]
-        # 尝试用 broker 适配器拉取真实状态 (调度器同款路径)
-        from app.trading.brokers import registry as broker_registry
-        adapter = broker_registry.get_adapter(broker_name, account)
-        broker_orders: list[dict] = []
-        broker_positions: list[dict] = []
-        broker_cash: float | None = None
-        if adapter is not None:
-            import contextlib
-            with contextlib.suppress(Exception):
-                broker_orders = adapter.get_orders()
-            with contextlib.suppress(Exception):
-                broker_positions = adapter.get_positions()
-            with contextlib.suppress(Exception):
-                broker_cash = adapter.get_account().get("cash")
+        try:
+            adapter = broker_service.require_connected(d, acc["broker"], account)
+            pulled = broker_service.pull(adapter)
+            broker_service.ingest_executions(
+                d, account, acc["broker"], list(pulled["executions"]),
+            )
+        except (broker_service.BrokerUnavailableError, broker_service.BrokerSyncError) as exc:
+            store.log_system_event(d, "reconciliation_unavailable", {
+                "account_id": account, "error": str(exc),
+            })
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         result = oms.trigger_reconciliation(
-            d, account, broker_orders, broker_positions, broker_cash,
+            d, account,
+            list(pulled["orders"]),
+            list(pulled["positions"]),
+            dict(pulled["account"])["cash"],
         )
+        refreshed = store.get_account(d, account) or acc
+        broker_service.persist_snapshot(d, account, refreshed["mode"], pulled)
         return result
 
     # ── 授权 ──────────────────────────────
@@ -354,7 +491,7 @@ def _register(router: APIRouter) -> None:
         store.init_db(d)
         try:
             grant = autonomy.create_grant(
-                d, body.strategy_id, body.level, body.max_order_value,
+                d, body.account_id, body.strategy_id, body.level, body.max_order_value,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
@@ -373,6 +510,13 @@ def _register(router: APIRouter) -> None:
     def arm(request: Request, account: str = Query(...)):
         d = _data_dir(request)
         store.init_db(d)
+        acc = store.get_account(d, account)
+        if acc is None:
+            raise HTTPException(status_code=404, detail="账户不存在")
+        try:
+            broker_service.require_connected(d, acc["broker"], account)
+        except broker_service.BrokerUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         try:
             return oms.arm_account(d, account)
         except oms.TradingError as e:

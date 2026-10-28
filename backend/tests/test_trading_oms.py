@@ -86,6 +86,19 @@ def test_approve_creates_order_approved(armed_account: Path):
     assert order["state"] == "approved"
 
 
+def test_approve_rechecks_account_mode(armed_account: Path):
+    r = oms.submit_intent(
+        armed_account, account_id="acc1", symbol="600000.SH",
+        side="buy", qty=100, price_policy="next_open",
+        limit_price=10.0, source="manual", rationale="测试",
+        risk_ctx=_ctx(armed_account),
+    )
+    oms.disarm_account(armed_account, "acc1")
+    with pytest.raises(oms.TradingError, match="不能审批"):
+        oms.approve(armed_account, r["intent_id"])
+    assert store.get_intent(armed_account, r["intent_id"])["status"] == "pending"
+
+
 def test_submit_to_broker_then_fill(armed_account: Path):
     r = oms.submit_intent(
         armed_account, account_id="acc1", symbol="600000.SH",
@@ -112,3 +125,80 @@ def test_submit_to_broker_then_fill(armed_account: Path):
     order = store.get_order(armed_account, ap["order_id"])
     assert order["state"] == "filled"
     assert order["filled_qty"] == 100
+
+
+def test_submit_success_without_broker_order_id_is_unknown(armed_account: Path):
+    r = oms.submit_intent(
+        armed_account, account_id="acc1", symbol="600000.SH",
+        side="buy", qty=100, price_policy="next_open",
+        limit_price=10.0, source="manual", rationale="测试",
+        risk_ctx=_ctx(armed_account),
+    )
+    ap = oms.approve(armed_account, r["intent_id"])
+
+    class _BrokenBroker:
+        def submit(self, order):
+            return {}
+
+    sub = oms.submit_to_broker(armed_account, ap["order_id"], _BrokenBroker())
+    assert sub["state"] == "unknown"
+
+
+def test_cancel_broker_failure_does_not_claim_cancelled(armed_account: Path):
+    r = oms.submit_intent(
+        armed_account, account_id="acc1", symbol="600000.SH",
+        side="buy", qty=100, price_policy="next_open",
+        limit_price=10.0, source="manual", rationale="测试",
+        risk_ctx=_ctx(armed_account),
+    )
+    ap = oms.approve(armed_account, r["intent_id"])
+    broker = MockBrokerAdapter(account_id="acc1", config=MockConfig(latency_ms=0))
+    oms.submit_to_broker(armed_account, ap["order_id"], broker)
+
+    class _RejectCancel:
+        def cancel(self, broker_order_id):
+            return {"success": False, "error": "券商拒绝撤单"}
+
+    with pytest.raises(oms.TradingError, match="券商拒绝撤单"):
+        oms.cancel(armed_account, ap["order_id"], _RejectCancel())
+    assert store.get_order(armed_account, ap["order_id"])["state"] == "submitted"
+
+
+def test_cancel_accepted_without_confirmation_moves_to_unknown(armed_account: Path):
+    r = oms.submit_intent(
+        armed_account, account_id="acc1", symbol="600000.SH",
+        side="buy", qty=100, price_policy="next_open", limit_price=10.0,
+        source="manual", rationale="测试", risk_ctx=_ctx(armed_account),
+    )
+    ap = oms.approve(armed_account, r["intent_id"])
+    broker = MockBrokerAdapter(account_id="acc1", config=MockConfig(latency_ms=0))
+    oms.submit_to_broker(armed_account, ap["order_id"], broker)
+
+    class _PendingCancel:
+        def cancel(self, broker_order_id):
+            return {"success": True, "confirmed": False, "broker_order_id": broker_order_id}
+
+    result = oms.cancel(armed_account, ap["order_id"], _PendingCancel())
+    assert result["state"] == "unknown"
+    assert result["pending_confirmation"] is True
+    assert store.get_order(armed_account, ap["order_id"])["state"] == "unknown"
+
+
+def test_broker_specific_preflight_runs_before_network_submit(armed_account: Path):
+    r = oms.submit_intent(
+        armed_account, account_id="acc1", symbol="600000.SH",
+        side="buy", qty=100, price_policy="next_open", limit_price=10.0,
+        source="manual", rationale="测试", risk_ctx=_ctx(armed_account),
+    )
+    ap = oms.approve(armed_account, r["intent_id"])
+
+    class _ClosedBroker:
+        def validate_order(self, order):
+            return {"allowed": False, "reason": "该券商当前交易时段关闭"}
+
+        def submit(self, order):
+            raise AssertionError("预检失败时不得访问券商网络")
+
+    with pytest.raises(oms.TradingError, match="交易时段关闭"):
+        oms.submit_to_broker(armed_account, ap["order_id"], _ClosedBroker())
+    assert store.get_order(armed_account, ap["order_id"])["state"] == "approved"

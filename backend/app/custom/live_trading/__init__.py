@@ -37,3 +37,13 @@ def startup(context: ExtensionContext) -> None:
     except Exception as e:  # noqa: BLE001 — 调度器是附加能力, 不阻塞核心启动
         import logging
         logging.getLogger(__name__).warning("ReconciliationScheduler not started: %s", e)
+
+
+async def shutdown(context: ExtensionContext) -> None:
+    """停止后台对账并断开所有券商连接，避免重载/退出后遗留任务。"""
+    del context
+    from app.trading import scheduler as _scheduler
+    from app.trading.brokers import registry as broker_registry
+
+    await _scheduler.stop_scheduler()
+    broker_registry.clear_instances()

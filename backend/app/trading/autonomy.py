@@ -27,6 +27,7 @@ MAX_ALLOWED_LEVEL = 1
 
 def create_grant(
     data_dir: Path,
+    account_id: str,
     strategy_id: str,
     level: int,
     max_order_value: float = 0.0,
@@ -36,11 +37,14 @@ def create_grant(
         raise ValueError(f"本版只允许创建 level ≤ {MAX_ALLOWED_LEVEL} 的授权")
     if level < 0:
         raise ValueError("level 必须 ≥ 0")
+    if store.get_account(data_dir, account_id) is None:
+        raise ValueError(f"账户不存在: {account_id!r}")
 
     from app.market_time import cn_now
     grant_id = _uuid()
     doc = {
         "grant_id": grant_id,
+        "account_id": account_id,
         "strategy_id": strategy_id,
         "level": level,
         "max_order_value": max_order_value,
@@ -52,9 +56,12 @@ def create_grant(
     def _do(conn: sqlite3.Connection) -> None:
         conn.execute(
             "INSERT INTO autonomy_grants("
-            " grant_id, strategy_id, level, max_order_value, enabled, created_at"
-            ") VALUES(?, ?, ?, ?, ?, ?)",
-            (grant_id, strategy_id, level, max_order_value, 1, cn_now().isoformat()),
+            " grant_id, account_id, strategy_id, level, max_order_value, enabled, created_at"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?)",
+            (
+                grant_id, account_id, strategy_id, level, max_order_value, 1,
+                cn_now().isoformat(),
+            ),
         )
 
     store._execute_write(data_dir, _do)
@@ -98,9 +105,10 @@ def effective_level(data_dir: Path, account_id: str, strategy_id: str) -> int:
     rows = store._query(
         data_dir,
         "SELECT level, created_at FROM autonomy_grants"
-        " WHERE strategy_id = ? AND enabled = 1 AND revoked_at IS NULL"
+        " WHERE account_id = ? AND strategy_id = ?"
+        " AND enabled = 1 AND revoked_at IS NULL"
         " ORDER BY created_at DESC",
-        (strategy_id,),
+        (account_id, strategy_id),
     )
     if not rows:
         return 0

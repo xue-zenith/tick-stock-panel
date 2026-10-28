@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # 这把锁只防同一进程内并发写冲突。
 _WRITE_LOCK = threading.RLock()
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 
 def _db_path(data_dir: Path) -> Path:
@@ -67,8 +67,28 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if current < 1:
         conn.executescript(_SCHEMA_V1)
         conn.execute(
-            "INSERT INTO schema_version(version, applied_at) VALUES (?, ?)",
-            (SCHEMA_VERSION, _now_iso()),
+            "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
+            (1, _now_iso()),
+        )
+    if current < 2:
+        conn.executescript(_SCHEMA_V2)
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
+            (2, _now_iso()),
+        )
+    if current < 3:
+        grant_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(autonomy_grants)").fetchall()
+        }
+        if "account_id" not in grant_columns:
+            conn.execute(
+                "ALTER TABLE autonomy_grants"
+                " ADD COLUMN account_id TEXT NOT NULL DEFAULT ''"
+            )
+        conn.executescript(_SCHEMA_V3)
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
+            (3, _now_iso()),
         )
 
 
@@ -249,6 +269,23 @@ CREATE TABLE IF NOT EXISTS system_events (
     ts        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_system_events_ts ON system_events(ts);
+"""
+
+
+_SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS position_snapshot_batches (
+    account_id TEXT NOT NULL,
+    as_of      TEXT NOT NULL,
+    PRIMARY KEY (account_id, as_of)
+);
+CREATE INDEX IF NOT EXISTS idx_position_batches_account
+ON position_snapshot_batches(account_id, as_of);
+"""
+
+
+_SCHEMA_V3 = """
+CREATE INDEX IF NOT EXISTS idx_autonomy_grants_account_strategy
+ON autonomy_grants(account_id, strategy_id, created_at);
 """
 
 
@@ -489,21 +526,66 @@ def decide_approval(
 # ── orders ───────────────────────────────────────────────
 def insert_order(data_dir: Path, order: dict) -> None:
     def _do(conn: sqlite3.Connection) -> None:
+        _insert_order_conn(conn, order)
+
+    _execute_write(data_dir, _do)
+
+
+def _insert_order_conn(conn: sqlite3.Connection, order: dict) -> None:
+    conn.execute(
+        "INSERT INTO orders("
+        " order_id, broker_order_id, account_id, intent_id, symbol, side, qty,"
+        " price_policy, limit_price, state, filled_qty, avg_fill_price,"
+        " submitted_at, last_update_at, reject_reason"
+        ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            order["order_id"], order.get("broker_order_id"), order["account_id"],
+            order["intent_id"], order["symbol"], order["side"], order["qty"],
+            order["price_policy"], order.get("limit_price"), order["state"],
+            order.get("filled_qty", 0), order.get("avg_fill_price"),
+            order.get("submitted_at"), order.get("last_update_at", _now_iso()),
+            order.get("reject_reason"),
+        ),
+    )
+
+
+def finalize_approval(
+    data_dir: Path,
+    *,
+    intent_id: str,
+    approval_id: str,
+    decision: str,
+    intent_status: str,
+    approver: str | None,
+    order: dict | None = None,
+) -> None:
+    """原子落库审批结果、意图状态和可选订单，防止半成功或重复审批。"""
+    def _do(conn: sqlite3.Connection) -> None:
+        intent = conn.execute(
+            "SELECT status FROM trade_intents WHERE intent_id = ?", (intent_id,),
+        ).fetchone()
+        if intent is None or intent[0] != "pending":
+            status = None if intent is None else intent[0]
+            raise RuntimeError(f"意图状态 {status!r}, 不能完成审批")
+        approval = conn.execute(
+            "SELECT decision FROM approvals WHERE approval_id = ? AND intent_id = ?",
+            (approval_id, intent_id),
+        ).fetchone()
+        if approval is None or approval[0] != "pending":
+            status = None if approval is None else approval[0]
+            raise RuntimeError(f"审批状态 {status!r}, 不能重复决策")
+        now = _now_iso()
         conn.execute(
-            "INSERT INTO orders("
-            " order_id, broker_order_id, account_id, intent_id, symbol, side, qty,"
-            " price_policy, limit_price, state, filled_qty, avg_fill_price,"
-            " submitted_at, last_update_at, reject_reason"
-            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                order["order_id"], order.get("broker_order_id"), order["account_id"],
-                order["intent_id"], order["symbol"], order["side"], order["qty"],
-                order["price_policy"], order.get("limit_price"), order["state"],
-                order.get("filled_qty", 0), order.get("avg_fill_price"),
-                order.get("submitted_at"), order.get("last_update_at", _now_iso()),
-                order.get("reject_reason"),
-            ),
+            "UPDATE trade_intents SET status = ? WHERE intent_id = ?",
+            (intent_status, intent_id),
         )
+        conn.execute(
+            "UPDATE approvals SET decision = ?, decided_at = ?, approver = ?"
+            " WHERE approval_id = ?",
+            (decision, now, approver, approval_id),
+        )
+        if order is not None:
+            _insert_order_conn(conn, order)
 
     _execute_write(data_dir, _do)
 
@@ -600,6 +682,23 @@ def update_order_state(
                 event_reason, _now_iso(),
             ),
         )
+
+    _execute_write(data_dir, _do)
+
+
+def bind_broker_order_id(data_dir: Path, order_id: str, broker_order_id: str) -> None:
+    """只补写券商订单号，不伪造一次状态迁移事件。
+
+    券商回调可能先于 submit 响应到达，此时订单可能已被回调推进到 FILLED；
+    响应返回后只能补齐 broker_order_id，不能把状态倒退回 SUBMITTED。
+    """
+    def _do(conn: sqlite3.Connection) -> None:
+        cur = conn.execute(
+            "UPDATE orders SET broker_order_id = ?, last_update_at = ? WHERE order_id = ?",
+            (broker_order_id, _now_iso(), order_id),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError(f"bind_broker_order_id: 订单不存在 {order_id!r}")
 
     _execute_write(data_dir, _do)
 
@@ -725,15 +824,67 @@ def upsert_position_snapshot(data_dir: Path, snap: dict) -> None:
     _execute_write(data_dir, _do)
 
 
+def replace_position_snapshots(
+    data_dir: Path,
+    account_id: str,
+    as_of: str,
+    positions: list[dict],
+) -> None:
+    """原子保存一次完整持仓快照，包括“空仓”这个有效状态。
+
+    旧实现只有逐行 upsert，券商清仓后没有任何新行，读取端会继续返回上一批
+    持仓。批次标记让空列表也能成为最新快照，避免幽灵持仓参与风控。
+    """
+    def _do(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO position_snapshot_batches(account_id, as_of) VALUES(?, ?)",
+            (account_id, as_of),
+        )
+        conn.execute(
+            "DELETE FROM position_snapshots WHERE account_id = ? AND as_of = ?",
+            (account_id, as_of),
+        )
+        for snap in positions:
+            conn.execute(
+                "INSERT INTO position_snapshots("
+                " account_id, symbol, as_of, qty, available_qty, avg_cost,"
+                " last_price, market_value, pnl"
+                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    account_id, snap["symbol"], as_of,
+                    snap.get("qty", 0), snap.get("available_qty", 0),
+                    snap.get("avg_cost", 0), snap.get("last_price"),
+                    snap.get("market_value", 0), snap.get("pnl", 0),
+                ),
+            )
+
+    _execute_write(data_dir, _do)
+
+
 def latest_positions(data_dir: Path, account_id: str) -> list[dict]:
-    rows = _query(
+    batch = _query_one(
         data_dir,
-        "SELECT p.* FROM position_snapshots p"
-        " WHERE account_id = ? AND as_of = ("
-        "   SELECT MAX(as_of) FROM position_snapshots WHERE account_id = ?"
-        " ) ORDER BY symbol",
-        (account_id, account_id),
+        "SELECT MAX(as_of) FROM position_snapshot_batches WHERE account_id = ?",
+        (account_id,),
     )
+    batch_as_of = batch[0] if batch is not None else None
+    if batch_as_of is not None:
+        rows = _query(
+            data_dir,
+            "SELECT p.* FROM position_snapshots p"
+            " WHERE account_id = ? AND as_of = ? AND qty != 0 ORDER BY symbol",
+            (account_id, batch_as_of),
+        )
+    else:
+        # v1 历史库兼容：首次 v2 快照前仍读取旧的最新逐行快照。
+        rows = _query(
+            data_dir,
+            "SELECT p.* FROM position_snapshots p"
+            " WHERE account_id = ? AND as_of = ("
+            "   SELECT MAX(as_of) FROM position_snapshots WHERE account_id = ?"
+            " ) AND qty != 0 ORDER BY symbol",
+            (account_id, account_id),
+        )
     return [dict(r) for r in rows]
 
 
@@ -832,6 +983,21 @@ def resolve_diff(data_dir: Path, diff_id: str) -> None:
             "UPDATE reconciliation_diffs SET resolved = 1, resolved_at = ?"
             " WHERE diff_id = ?",
             (_now_iso(), diff_id),
+        )
+
+    _execute_write(data_dir, _do)
+
+
+def resolve_account_diffs(data_dir: Path, account_id: str, *, before_run_id: str) -> None:
+    """新一轮 clean 对账后解决该账户的历史差异，不改动当前运行。"""
+    def _do(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "UPDATE reconciliation_diffs SET resolved = 1, resolved_at = ?"
+            " WHERE resolved = 0 AND run_id IN ("
+            "   SELECT run_id FROM reconciliation_runs"
+            "   WHERE account_id = ? AND run_id != ?"
+            " )",
+            (_now_iso(), account_id, before_run_id),
         )
 
     _execute_write(data_dir, _do)

@@ -7,6 +7,7 @@ import queue
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException, Request
 
 from app.services import alert_store, event_tickets
 from app.services.events import EventBus, bus, sse_format
@@ -39,6 +40,43 @@ def test_ticket_overflow_guard(monkeypatch: pytest.MonkeyPatch):
     event_tickets.issue(["read:market"])
     with pytest.raises(RuntimeError):
         event_tickets.issue(["read:market"])
+
+
+def test_ui_session_can_issue_full_scope_ticket(monkeypatch: pytest.MonkeyPatch):
+    from app.api import events as events_api
+    from app.services import auth as auth_service
+
+    monkeypatch.setattr(auth_service, "is_configured", lambda: True)
+    monkeypatch.setattr(auth_service, "is_valid_session", lambda token: token == "good")
+    request = Request({
+        "type": "http",
+        "method": "POST",
+        "path": "/api/events/ticket",
+        "headers": [(b"cookie", b"tf_session=good")],
+        "client": ("127.0.0.1", 1234),
+        "app": object(),
+    })
+
+    result = events_api.issue_ticket(request)
+
+    assert event_tickets.consume(result["ticket"]) == ["*"]
+
+
+def test_ticket_rejects_missing_ui_session(monkeypatch: pytest.MonkeyPatch):
+    from app.api import events as events_api
+    from app.services import auth as auth_service
+
+    monkeypatch.setattr(auth_service, "is_configured", lambda: True)
+    request = Request({
+        "type": "http",
+        "method": "POST",
+        "path": "/api/events/ticket",
+        "headers": [],
+        "client": ("127.0.0.1", 1234),
+        "app": object(),
+    })
+    with pytest.raises(HTTPException, match="未登录"):
+        events_api.issue_ticket(request)
 
 
 # ── 总线 ──────────────────────────────────────────────
