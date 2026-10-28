@@ -122,6 +122,11 @@ class MiningJobManager:
                 self._store.append_event(run_id, "cancelling", {"status": "cancelling"})
             return manifest
 
+    def has_active_jobs(self) -> bool:
+        """是否有 mining job 正在跑 (供健康检查器判断行情暂停是否由 pipeline 引起)。"""
+        with self._lock:
+            return bool(self._threads)
+
     def shutdown(self) -> None:
         with self._lock:
             self._shutdown = True

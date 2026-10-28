@@ -106,6 +106,19 @@ class GenericHTTPProvider:
     def close(self) -> None:
         self._client.close()
 
+    def rebuild_client(self) -> None:
+        """关闭旧 httpx 客户端并新建一个, 用于健康检查自愈。
+
+        与 __init__ 的构造逻辑保持一致 (统一 timeout, 无自定义 headers/auth);
+        调用方健康检查器检测到连接池僵死时调用, 下一轮 get_realtime() 拿到全新池。
+        """
+        old = self._client
+        self._client = httpx.Client(timeout=30.0)
+        try:
+            old.close()
+        except Exception:  # noqa: BLE001
+            pass
+
     def validate(self) -> list[str]:
         errors: list[str] = []
         for dataset, cfg in self.config.datasets.items():

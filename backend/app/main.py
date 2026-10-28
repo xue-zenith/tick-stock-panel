@@ -23,6 +23,7 @@ from app.api import (
     ext_pages,
     factors,
     financials,
+    health,
     indices,
     intraday,
     kline,
@@ -325,8 +326,12 @@ async def _application_lifespan(app: FastAPI):
     app.state.financial_scheduler = financial_scheduler
 
     # 自愈看门狗: 探测 polars 闸与写锁, 僵死时退出交由 supervisor 拉起 (兜底层)。
-    from app.watchdog import start_watchdog
+    from app.watchdog import start_quote_health_watcher, start_watchdog
     app.state.watchdog = start_watchdog(app.state, repo)
+
+    # 行情源健康检查: 探测 QuoteService 连接池僵死 (quote_age 陈旧 + 独立探针可达源),
+    # 软重建 httpx 客户端, 持续失败再退出。仅 fuyao provider 启用。
+    app.state.quote_watcher = start_quote_health_watcher(app.state)
 
     # 策略引擎
     from app.services.screener import ScreenerService
@@ -477,6 +482,9 @@ async def _application_lifespan(app: FastAPI):
         yield
     finally:
         repo._on_refresh_done = None  # noqa: SLF001
+        qw = getattr(app.state, "quote_watcher", None)
+        if qw:
+            await qw.stop()
         wd = getattr(app.state, "watchdog", None)
         if wd:
             await wd.stop()
@@ -656,6 +664,7 @@ app.include_router(signals.router)
 app.include_router(monitor_rules.router)
 app.include_router(lots.router)
 app.include_router(alerts.router)
+app.include_router(health.router)
 app.include_router(events.router)
 app.include_router(rps.router)
 app.include_router(sector_rotation.router)

@@ -335,6 +335,39 @@ class QuoteService:
         self._save_enabled(False)
         logger.info("行情服务已关闭")
 
+    def rebuild_realtime_client(self) -> None:
+        """重建自定义源 provider 的 httpx 客户端, 用于健康检查自愈。
+
+        两种 provider 走不同路径:
+        - FuyaoProvider: 调 close() 置 _client=None, 下次 _get_client() 懒重建
+          FuyaoClient (不能用裸 httpx.Client 替换, 否则 snapshot_all 等方法丢失)。
+        - GenericHTTPProvider: 调 rebuild_client() 替换 httpx.Client。
+        """
+        from app.data_providers import custom as custom_sources
+        from app.services import preferences
+
+        name = preferences.get_realtime_data_provider()
+        if name == "tickflow":
+            return
+        provider = custom_sources.get_provider(name)
+
+        # 优先用 provider 自己的 close() (FuyaoProvider.close 会置 None + 懒重建)
+        # 这能正确处理 FuyaoClient 重建, 避免 snapshot_all 等方法丢失。
+        close_method = getattr(provider, "close", None)
+        if callable(close_method):
+            try:
+                close_method()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("rebuild: close() 失败: %r", e)
+        # 如果 provider 暴露了 rebuild_client (GenericHTTPProvider), 用它替换 httpx.Client
+        rebuild_method = getattr(provider, "rebuild_client", None)
+        if callable(rebuild_method):
+            try:
+                rebuild_method()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("rebuild: rebuild_client() 失败: %r", e)
+        logger.warning("行情客户端已软重建 (provider=%s)", name)
+
     # ================================================================
     # 临时暂停 (盘后管道/数据修正期间, 防止写盘竞态)
     # ================================================================

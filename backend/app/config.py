@@ -141,6 +141,16 @@ class Settings(BaseSettings):
     watchdog_probe_timeout_s: float = 15.0
     watchdog_failure_threshold: int = 2
 
+    # 行情源健康检查 — 双信号诊断 QuoteService 连接池僵死 (quote_age 陈旧 +
+    # 独立探针仍可达扶摇)。第一级软重建客户端, 第二级 os._exit 交 supervisor。
+    # 见 app/watchdog.py: QuoteHealthWatcher。
+    quote_health_enabled: bool = True
+    quote_health_interval_s: float = 60.0
+    quote_health_probe_timeout_s: float = 10.0
+    quote_health_rebuild_threshold: int = 3
+    quote_health_exit_threshold: int = 10
+    quote_health_stale_intervals: int = 3  # quote_age > interval * stale_intervals 即陈旧
+
     # 策略批量执行 (run_all / 策略页全量跑) 的并发 worker 上限。实测 2026-09-07:
     # polars eager 操作内部已多线程并行, 外层再并发 4 worker 属超订, 41 策略
     # 299.6s 慢于串行 — 默认 1 (串行)。保留开关供配合 POLARS_MAX_THREADS 调优实验。
@@ -193,6 +203,15 @@ class Settings(BaseSettings):
             raise ValueError("watchdog intervals must be positive")
         if self.watchdog_failure_threshold < 1:
             raise ValueError("watchdog_failure_threshold must be >= 1")
+        if self.quote_health_enabled:
+            if self.quote_health_interval_s <= 0 or self.quote_health_probe_timeout_s <= 0:
+                raise ValueError("quote_health intervals must be positive")
+            if self.quote_health_rebuild_threshold < 1:
+                raise ValueError("quote_health_rebuild_threshold must be >= 1")
+            if self.quote_health_exit_threshold < self.quote_health_rebuild_threshold:
+                raise ValueError("quote_health_exit_threshold must be >= rebuild_threshold")
+            if self.quote_health_stale_intervals < 1:
+                raise ValueError("quote_health_stale_intervals must be >= 1")
         if self.strategy_run_all_workers < 1:
             raise ValueError("strategy_run_all_workers must be >= 1")
         if self.strategy_run_all_first_return_s < 0:
