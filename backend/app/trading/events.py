@@ -154,7 +154,12 @@ def mode_change(account_id: str, from_mode: str, to_mode: str) -> dict:
 
 
 def publish(data_dir: Path, events: list[dict]) -> None:
-    """落盘到 alert_store 并广播到事件总线 (软失败, 不阻塞主流程)."""
+    """落盘到 alert_store 并广播到事件总线 (软失败, 不阻塞主流程).
+
+    双发: alert_store.append_many 内部已 bus.publish("alert", ..., scope="read:analysis")
+    (告警链路); 这里追加 bus.publish("live_trading", ..., scope="live:read")
+    供实盘页面 SSE 监听自动刷新 (蓝图 §12.3 REST 快照 + SSE 增量)。
+    """
     if not events:
         return
     try:
@@ -162,6 +167,13 @@ def publish(data_dir: Path, events: list[dict]) -> None:
         alert_store.append_many(data_dir, events)
     except Exception:  # noqa: BLE001 — 事件通道绝不反噬主流程
         logger.debug("live_trading 事件落盘失败 (忽略)", exc_info=True)
+    # 追加 live_trading 事件类型广播 (scope=live:read, 实盘页面订阅)
+    try:
+        from app.services.events import bus
+        for ev in events:
+            bus.publish("live_trading", ev, scope="live:read")
+    except Exception:  # noqa: BLE001
+        logger.debug("live_trading 事件总线广播失败 (忽略)", exc_info=True)
 
 
 def now_iso() -> str:

@@ -462,6 +462,28 @@ def trigger_reconciliation(
     return result
 
 
-def list_orders(data_dir: Path, status: str | None = None, account_id: str | None = None) -> list[dict]:
+def list_orders(
+    data_dir: Path,
+    status: str | None = None,
+    account_id: str | None = None,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict]:
     store.init_db(data_dir)
-    return store.list_orders(data_dir, status=status, account_id=account_id)
+    return store.list_orders(data_dir, status=status, account_id=account_id, limit=limit, offset=offset)
+
+
+def list_executions(
+    data_dir: Path,
+    *,
+    account_id: str | None = None,
+    order_id: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict]:
+    """成交明细列表 (透传 store.list_executions_all)."""
+    store.init_db(data_dir)
+    return store.list_executions_all(
+        data_dir, account_id=account_id, order_id=order_id, limit=limit, offset=offset,
+    )

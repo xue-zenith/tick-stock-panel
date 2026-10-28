@@ -58,6 +58,28 @@ _RULES: list[tuple[str, str, str]] = [
     ("POST", "/api/backtest/strategy/run", "run:backtest"),
     # paper:trade — 模拟盘全部 (读+写一体, 单一 scope 简化心智)
     ("*", "/api/paper", "paper:trade"),
+    # live — 实盘交易按蓝图 §14 拆分权限
+    # live:read 读取类 (账户/订单/成交/审批/健康/对账/调度器/授权)
+    ("GET", "/api/live/accounts", "live:read"),
+    ("GET", "/api/live/orders", "live:read"),
+    ("GET", "/api/live/executions", "live:read"),
+    ("GET", "/api/live/approvals", "live:read"),
+    ("GET", "/api/live/health", "live:read"),
+    ("GET", "/api/live/reconciliation", "live:read"),
+    ("GET", "/api/live/scheduler", "live:read"),
+    ("GET", "/api/live/autonomy", "live:read"),
+    # live:propose 提交交易意图 (不自动执行, 需审批)
+    ("POST", "/api/live/orders", "live:propose"),
+    # live:approve 审批通过/拒绝 + 撤单
+    ("POST", "/api/live/approvals", "live:approve"),
+    ("DELETE", "/api/live/orders", "live:approve"),
+    # live:admin 账户管理/启停/对账触发/调度器/授权
+    ("POST", "/api/live/accounts", "live:admin"),
+    ("POST", "/api/live/arm", "live:admin"),
+    ("POST", "/api/live/disarm", "live:admin"),
+    ("POST", "/api/live/reconciliation/run", "live:admin"),
+    ("POST", "/api/live/scheduler/run-now", "live:admin"),
+    ("POST", "/api/live/autonomy", "live:admin"),
     # events — 换取 SSE 短期票据: 任意有效 Token 即可 (票据只继承已有 scope,
     # 不放大权限, 故此处用 "*" 表示"仅需认证", 不做 scope 校验)
     ("POST", "/api/events/ticket", "*"),

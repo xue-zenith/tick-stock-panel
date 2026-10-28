@@ -530,6 +530,9 @@ def list_orders(
     data_dir: Path,
     status: str | None = None,
     account_id: str | None = None,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[dict]:
     sql = "SELECT * FROM orders"
     params: list[object] = []
@@ -543,6 +546,10 @@ def list_orders(
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY last_update_at DESC"
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params.append(limit)
+        params.append(offset)
     return [dict(r) for r in _query(data_dir, sql, tuple(params))]
 
 
@@ -631,6 +638,34 @@ def list_executions(data_dir: Path, order_id: str) -> list[dict]:
             (order_id,),
         )
     ]
+
+
+def list_executions_all(
+    data_dir: Path,
+    *,
+    account_id: str | None = None,
+    order_id: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict]:
+    """成交明细列表 (支持账户/订单过滤 + 分页, 供 /api/live/executions 使用)."""
+    sql = "SELECT * FROM executions"
+    params: list[object] = []
+    where: list[str] = []
+    if account_id:
+        where.append("account_id = ?")
+        params.append(account_id)
+    if order_id:
+        where.append("order_id = ?")
+        params.append(order_id)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY ts DESC"
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params.append(limit)
+        params.append(offset)
+    return [dict(r) for r in _query(data_dir, sql, tuple(params))]
 
 
 # ── order_events ─────────────────────────────────────────

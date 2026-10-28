@@ -1,23 +1,25 @@
 /**
- * 实盘交易主页面 — 账户创建/选择/模式 + 订单/审批/健康 Tab。
+ * 实盘交易主页面 — 账户创建/选择/模式 + 订单/成交/审批/健康 Tab。
  *
- * 空状态: 无账户时显示「创建账户」引导, 不留白页。
- * 账户选择: 下拉切换 + 模式徽标 + Arm/Disarm + 创建更多账户入口。
- * Broker 连接: 显示已注册 broker 名称 + 调度器运行状态。
+ * 顶部固定 LIVE 安全栏: 模式徽标 + 未解决对账差异 + arm/disarm + SSE 连接状态。
+ * SSE: useLiveTradingSSE 监听 live_trading 事件, 自动失效所有 live 查询。
  */
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronDown, Plus, ShieldCheck, Wallet, Wifi, WifiOff } from 'lucide-react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { ChevronDown, Plus, ShieldCheck, ShieldAlert, Wallet, Wifi, WifiOff, Radio } from 'lucide-react'
 import { api, type LiveAccount } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
 import { cn } from '@/lib/cn'
 import { AccountOverview } from './AccountOverview'
 import { OrdersPanel } from './OrdersPanel'
+import { ExecutionsPanel } from './ExecutionsPanel'
 import { ApprovalsPanel } from './ApprovalsPanel'
 import { HealthPanel } from './HealthPanel'
 import { ArmDisarmButtons, ModeBadge } from './controls'
 import { CreateAccountModal } from './CreateAccountModal'
+import { useLiveTradingSSE } from './useLiveTradingSSE'
 
 /** 账户选择器 — 自定义下拉 (不依赖原生 <select>, 完全 CSS 接管, dark/light 通用)。 */
 function AccountSelector({
@@ -76,8 +78,11 @@ export function LiveTradingPage() {
   const liveAccounts: LiveAccount[] = accountsQ.data?.accounts ?? []
   const [selectedAccount, setSelectedAccount] = useState<string | null>(null)
   const effAccount = selectedAccount ?? liveAccounts[0]?.account_id ?? null
-  const [tab, setTab] = useState<'overview' | 'orders' | 'approvals' | 'health'>('overview')
+  const [tab, setTab] = useState<'overview' | 'orders' | 'executions' | 'approvals' | 'health'>('overview')
   const [createOpen, setCreateOpen] = useState(false)
+
+  // SSE: 监听 live_trading 事件, 自动失效所有 live 查询 (有账户时才连接)
+  const sseStatus = useLiveTradingSSE(!!effAccount)
 
   const healthQ = useQuery({
     queryKey: QK.liveHealth(effAccount ?? ''),
@@ -157,17 +162,45 @@ export function LiveTradingPage() {
         }
       />
 
-      {/* 账户选择 + 模式 + arm/disarm */}
+      {/* LIVE 安全栏 (蓝图 §12.3: 顶部固定, 显示模式/差异/SSE状态) */}
+      {effAccount && (
+        <div className={cn(
+          'mb-4 flex flex-wrap items-center gap-3 rounded-md border px-3 py-2',
+          (healthQ.data?.unresolved_diffs ?? 0) > 0
+            ? 'border-amber-500/40 bg-amber-500/10'
+            : 'border-border bg-surface',
+        )}>
+          <span className="inline-flex items-center gap-1 text-sm font-semibold">
+            <ShieldAlert size={14} className="text-accent" />
+            LIVE
+          </span>
+          <ModeBadge mode={healthQ.data?.mode ?? 'disarmed'} />
+          {(healthQ.data?.unresolved_diffs ?? 0) > 0 && (
+            <span className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+              <ShieldAlert size={12} />
+              {healthQ.data?.unresolved_diffs} 处对账差异
+            </span>
+          )}
+          <ArmDisarmButtons account_id={effAccount} mode={healthQ.data?.mode} />
+          {/* SSE 连接状态 */}
+          <span className={cn(
+            'inline-flex items-center gap-1 text-xs',
+            sseStatus === 'connected' ? 'text-emerald-500' :
+            sseStatus === 'error' ? 'text-danger' : 'text-muted-foreground',
+          )}>
+            <Radio size={12} className={sseStatus === 'connected' ? '' : 'animate-pulse'} />
+            {sseStatus === 'connected' ? '实时' : sseStatus === 'connecting' ? '连接中' : sseStatus === 'reconnecting' ? '重连' : sseStatus === 'error' ? '断线' : '未连接'}
+          </span>
+        </div>
+      )}
+
+      {/* 账户选择 */}
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <AccountSelector
           accounts={liveAccounts}
           value={effAccount}
           onChange={setSelectedAccount}
         />
-        {effAccount && (
-          <ModeBadge mode={healthQ.data?.mode ?? 'disarmed'} />
-        )}
-        {effAccount && <ArmDisarmButtons account_id={effAccount} mode={healthQ.data?.mode} />}
         {effAccount && (
           <span className="text-xs text-muted-foreground">
             broker: {liveAccounts.find(a => a.account_id === effAccount)?.broker ?? '--'}
@@ -179,7 +212,7 @@ export function LiveTradingPage() {
 
       {/* Tabs */}
       <div className="mb-4 flex gap-1 border-b border-border">
-        {(['overview', 'orders', 'approvals', 'health'] as const).map((t) => (
+        {(['overview', 'orders', 'executions', 'approvals', 'health'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -188,15 +221,26 @@ export function LiveTradingPage() {
               tab === t ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground',
             )}
           >
-            {{ overview: '账户概览', orders: '订单', approvals: '待审批', health: '健康/对账' }[t]}
+            {{ overview: '账户概览', orders: '订单', executions: '成交', approvals: '待审批', health: '健康/对账' }[t]}
           </button>
         ))}
       </div>
 
-      {tab === 'overview' && <AccountOverview account_id={effAccount} />}
-      {tab === 'orders' && <OrdersPanel account_id={effAccount} />}
-      {tab === 'approvals' && <ApprovalsPanel />}
-      {tab === 'health' && <HealthPanel account_id={effAccount} />}
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={tab}
+          initial={{ opacity: 0, y: 4 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -4 }}
+          transition={{ duration: 0.15 }}
+        >
+          {tab === 'overview' && <AccountOverview account_id={effAccount} />}
+          {tab === 'orders' && <OrdersPanel account_id={effAccount} />}
+          {tab === 'executions' && <ExecutionsPanel account_id={effAccount} />}
+          {tab === 'approvals' && <ApprovalsPanel />}
+          {tab === 'health' && <HealthPanel account_id={effAccount} />}
+        </motion.div>
+      </AnimatePresence>
 
       {createOpen && (
         <CreateAccountModal

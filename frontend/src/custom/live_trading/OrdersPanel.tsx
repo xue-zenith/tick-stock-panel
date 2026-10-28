@@ -1,12 +1,14 @@
 /**
- * 订单面板 — 列表 + 提交表单 + 撤单。
+ * 订单面板 — 列表 + 提交表单 + 撤单 + 行展开 (事件 + 成交明细)。
  */
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Send } from 'lucide-react'
-import { api, type LiveOrder } from '@/lib/api'
+import { Send, ChevronRight } from 'lucide-react'
+import { api, type LiveOrder, type LiveOrderEvent, type LiveExecution } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { Modal } from '@/components/Modal'
+import { fmtPrice, cnDateTimeFromUtc } from '@/lib/format'
+import { cn } from '@/lib/cn'
 
 const STATE_LABEL: Record<string, string> = {
   created: '已创建',
@@ -41,6 +43,7 @@ export function OrdersPanel({ account_id }: { account_id: string | null }) {
   })
   const orders: LiveOrder[] = data?.orders ?? []
   const [submitOpen, setSubmitOpen] = useState(false)
+  const [expandedId, setExpandedId] = useState<string | null>(null)
 
   const cancelM = useMutation({
     mutationFn: (id: string) => api.liveCancelOrder(id),
@@ -67,6 +70,7 @@ export function OrdersPanel({ account_id }: { account_id: string | null }) {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border text-muted-foreground">
+                <th className="px-2 py-1.5 w-8"></th>
                 <th className="px-3 py-1.5 text-left">标的</th>
                 <th className="px-3 py-1.5 text-left">方向</th>
                 <th className="px-3 py-1.5 text-right">数量</th>
@@ -80,26 +84,16 @@ export function OrdersPanel({ account_id }: { account_id: string | null }) {
             <tbody>
               {orders.map((o) => {
                 const cancellable = ['approved', 'submitted', 'partially_filled'].includes(o.state)
+                const expanded = expandedId === o.order_id
                 return (
-                  <tr key={o.order_id} className="border-b border-border/50">
-                    <td className="px-3 py-1.5">{o.symbol}</td>
-                    <td className={`px-3 py-1.5 ${o.side === 'buy' ? 'text-red-500' : 'text-emerald-500'}`}>{o.side === 'buy' ? '买入' : '卖出'}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{o.qty}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{o.limit_price != null ? o.limit_price.toFixed(2) : '--'}</td>
-                    <td className={`px-3 py-1.5 ${STATE_COLOR[o.state] || ''}`}>{STATE_LABEL[o.state] || o.state}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{o.filled_qty}</td>
-                    <td className="px-3 py-1.5 text-xs text-muted-foreground">{o.broker_order_id ?? '--'}</td>
-                    <td className="px-3 py-1.5 text-right">
-                      {cancellable && (
-                        <button
-                          onClick={() => cancelM.mutate(o.order_id)}
-                          className="rounded-btn border border-border px-2 py-0.5 text-xs text-secondary transition-colors hover:bg-elevated hover:text-foreground"
-                        >
-                          撤单
-                        </button>
-                      )}
-                    </td>
-                  </tr>
+                  <OrderRow
+                    key={o.order_id}
+                    order={o}
+                    cancellable={cancellable}
+                    expanded={expanded}
+                    onToggle={() => setExpandedId(expanded ? null : o.order_id)}
+                    onCancel={() => cancelM.mutate(o.order_id)}
+                  />
                 )
               })}
             </tbody>
@@ -118,6 +112,112 @@ export function OrdersPanel({ account_id }: { account_id: string | null }) {
   )
 }
 
+function OrderRow({
+  order: o,
+  cancellable,
+  expanded,
+  onToggle,
+  onCancel,
+}: {
+  order: LiveOrder
+  cancellable: boolean
+  expanded: boolean
+  onToggle: () => void
+  onCancel: () => void
+}) {
+  return (
+    <>
+      <tr className="border-b border-border/50">
+        <td className="px-2 py-1.5">
+          <button
+            onClick={onToggle}
+            className="text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <ChevronRight size={14} className={cn('transition-transform', expanded && 'rotate-90')} />
+          </button>
+        </td>
+        <td className="px-3 py-1.5 font-mono">{o.symbol}</td>
+        <td className={cn('px-3 py-1.5', o.side === 'buy' ? 'text-bull' : 'text-bear')}>
+          {o.side === 'buy' ? '买入' : '卖出'}
+        </td>
+        <td className="px-3 py-1.5 text-right tabular-nums">{o.qty}</td>
+        <td className="px-3 py-1.5 text-right tabular-nums">{fmtPrice(o.limit_price)}</td>
+        <td className={cn('px-3 py-1.5', STATE_COLOR[o.state] || '')}>{STATE_LABEL[o.state] || o.state}</td>
+        <td className="px-3 py-1.5 text-right tabular-nums">{o.filled_qty}</td>
+        <td className="px-3 py-1.5 text-xs text-muted-foreground">{o.broker_order_id ?? '--'}</td>
+        <td className="px-3 py-1.5 text-right">
+          {cancellable && (
+            <button
+              onClick={onCancel}
+              className="rounded-btn border border-border px-2 py-0.5 text-xs text-secondary transition-colors hover:bg-elevated hover:text-foreground"
+            >
+              撤单
+            </button>
+          )}
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="border-b border-border/50 bg-surface/50">
+          <td colSpan={9} className="px-4 py-2">
+            <OrderDetail order_id={o.order_id} />
+          </td>
+        </tr>
+      )}
+    </>
+  )
+}
+
+function OrderDetail({ order_id }: { order_id: string }) {
+  const { data: eventsData } = useQuery({
+    queryKey: ['live', 'order-events', order_id],
+    queryFn: () => api.liveOrderEvents(order_id),
+  })
+  const { data: execsData } = useQuery({
+    queryKey: ['live', 'order-executions', order_id],
+    queryFn: () => api.liveOrderExecutions(order_id),
+  })
+  const events: LiveOrderEvent[] = eventsData?.events ?? []
+  const execs: LiveExecution[] = execsData?.executions ?? []
+  return (
+    <div className="grid gap-3 sm:grid-cols-2">
+      <div>
+        <h4 className="mb-1 text-xs font-medium text-muted-foreground">状态事件</h4>
+        {events.length === 0 ? (
+          <div className="text-xs text-muted-foreground">无</div>
+        ) : (
+          <div className="max-h-40 overflow-y-auto">
+            {events.map((e) => (
+              <div key={e.event_id} className="flex gap-2 py-0.5 text-xs">
+                <span className="text-muted-foreground tabular-nums">{cnDateTimeFromUtc(e.ts) || e.ts}</span>
+                <span className={cn(e.from_state && STATE_COLOR[e.from_state])}>{STATE_LABEL[e.from_state ?? ''] ?? e.from_state}</span>
+                <span className="text-muted-foreground">→</span>
+                <span className={cn(STATE_COLOR[e.to_state])}>{STATE_LABEL[e.to_state] ?? e.to_state}</span>
+                {e.reason && <span className="text-muted-foreground">{e.reason}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div>
+        <h4 className="mb-1 text-xs font-medium text-muted-foreground">成交明细</h4>
+        {execs.length === 0 ? (
+          <div className="text-xs text-muted-foreground">无</div>
+        ) : (
+          <div className="max-h-40 overflow-y-auto">
+            {execs.map((ex) => (
+              <div key={ex.exec_id} className="flex gap-2 py-0.5 text-xs tabular-nums">
+                <span className="text-muted-foreground">{cnDateTimeFromUtc(ex.ts) || ex.ts}</span>
+                <span>{ex.qty}@{fmtPrice(ex.price)}</span>
+                <span className="text-muted-foreground">{ex.broker_trade_id}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function SubmitIntentModal({
   account_id,
   onClose,
@@ -130,6 +230,7 @@ function SubmitIntentModal({
   const [symbol, setSymbol] = useState('')
   const [side, setSide] = useState<'buy' | 'sell'>('buy')
   const [qty, setQty] = useState(100)
+  const [pricePolicy, setPricePolicy] = useState<'limit' | 'next_open' | 'close'>('next_open')
   const [limitPrice, setLimitPrice] = useState<string>('')
   const [result, setResult] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -141,7 +242,7 @@ function SubmitIntentModal({
         symbol,
         side,
         qty,
-        price_policy: 'limit',
+        price_policy: pricePolicy,
         limit_price: limitPrice ? Number(limitPrice) : null,
         source: 'manual',
       }),
@@ -149,8 +250,11 @@ function SubmitIntentModal({
       setResult(`意图 ${r.intent_id} | 状态: ${r.status}${r.reasons?.length ? ' | 原因: ' + r.reasons.join('; ') : ''}`)
       onSubmitted()
     },
-    onError: (e: unknown) => setError(String(e)),
+    onError: (e: unknown) => setError(String((e as Error)?.message || e)),
   })
+
+  // 价格偏离提示: limit 策略下, 限价偏离参考价 > 2% 时警告
+  const needsPrice = pricePolicy === 'limit'
 
   const INPUT_CLS = 'mt-1 w-full rounded-btn border border-border bg-base px-2.5 py-1.5 text-sm outline-none transition-colors focus:border-accent/50'
   const LABEL_CLS = 'block text-[11px] text-muted'
@@ -189,16 +293,26 @@ function SubmitIntentModal({
             </div>
           </div>
           <div>
-            <label className={LABEL_CLS}>限价</label>
-            <input value={limitPrice} onChange={(e) => setLimitPrice(e.target.value)} placeholder="1500.00" className={`${INPUT_CLS} font-mono`} />
+            <label className={LABEL_CLS}>价格策略</label>
+            <select value={pricePolicy} onChange={(e) => setPricePolicy(e.target.value as 'limit' | 'next_open' | 'close')} className={INPUT_CLS}>
+              <option value="next_open">次日开盘价 (盘后, 不需实时行情)</option>
+              <option value="close">当日收盘价 (盘后)</option>
+              <option value="limit">限价 (需实时行情)</option>
+            </select>
           </div>
+          {needsPrice && (
+            <div>
+              <label className={LABEL_CLS}>限价</label>
+              <input value={limitPrice} onChange={(e) => setLimitPrice(e.target.value)} placeholder="1500.00" className={`${INPUT_CLS} font-mono`} />
+            </div>
+          )}
         </div>
         {result && <div className="mt-3 rounded-btn bg-accent/15 px-2.5 py-1.5 text-[11px] text-secondary">{result}</div>}
         {error && <div className="mt-3 rounded-btn bg-danger/10 px-2.5 py-1.5 text-[11px] text-danger">{error}</div>}
         <div className="mt-5 flex gap-2">
           <button
             onClick={() => submitM.mutate()}
-            disabled={submitM.isPending || !symbol}
+            disabled={submitM.isPending || !symbol || (needsPrice && !limitPrice)}
             className="flex-1 rounded-btn bg-accent py-2 text-sm font-medium text-white transition-opacity hover:bg-accent/90 disabled:opacity-50"
           >
             {submitM.isPending ? '提交中…' : '提交'}

@@ -94,6 +94,109 @@ def test_disarm(client: TestClient):
     assert r.json()["mode"] == "disarmed"
 
 
+def test_limit_order_rejected_without_quote_snapshot(client: TestClient, tmp_path: Path):
+    """limit 单在无实时行情快照时 fail-closed 拒绝 (蓝图 §10.1).
+
+    测试环境无 quote_service → _fetch_quote_snapshot 返回空 → 400。
+    """
+    from app.trading import store
+    client.post("/api/live/accounts", json={
+        "account_id": "acc1", "broker": "mock", "display_name": "主",
+    })
+    store.upsert_account_snapshot(tmp_path, {
+        "account_id": "acc1", "as_of": "2026-10-21T10:00:00+08:00",
+        "cash": 1_000_000, "frozen_cash": 0, "market_value": 0,
+        "total": 1_000_000, "nav": 1_000_000, "mode": "disarmed",
+    })
+    client.post("/api/live/reconciliation/run?account=acc1")
+    client.post("/api/live/arm?account=acc1")
+    # limit 单, 无 quote_service → 400
+    r = client.post("/api/live/orders", json={
+        "account_id": "acc1", "symbol": "600000.SH", "side": "buy", "qty": 100,
+        "price_policy": "limit", "limit_price": 10.0,
+    })
+    assert r.status_code == 400
+    assert "行情" in r.json()["detail"]
+
+
+def test_limit_order_passes_with_quote_snapshot(client: TestClient, tmp_path: Path):
+    """limit 单在有行情快照时正常提交 (注入 mock quote_service)."""
+    from types import SimpleNamespace
+    import polars as pl
+    from app.trading import store
+
+    class _MockQuoteSvc:
+        def get_enriched_today(self):
+            df = pl.DataFrame({
+                "symbol": ["600000.SH"],
+                "close": [10.0],
+                "prev_close": [9.9],
+                "limit_up_price": [11.0],
+                "limit_down_price": [9.0],
+            })
+            return df, None
+
+    # 注入 mock quote_service 到 app.state
+    client.app.state.quote_service = _MockQuoteSvc()
+    client.post("/api/live/accounts", json={
+        "account_id": "acc1", "broker": "mock", "display_name": "主",
+    })
+    store.upsert_account_snapshot(tmp_path, {
+        "account_id": "acc1", "as_of": "2026-10-21T10:00:00+08:00",
+        "cash": 1_000_000, "frozen_cash": 0, "market_value": 0,
+        "total": 1_000_000, "nav": 1_000_000, "mode": "disarmed",
+    })
+    client.post("/api/live/reconciliation/run?account=acc1")
+    client.post("/api/live/arm?account=acc1")
+    # limit 单, 有 quote_service → 进入风控 (非交易时段可能被 trading_session 拒)
+    # 用 next_open 绕开 trading_session, 但 next_open 不需要行情 → 改用 limit 验证行情注入
+    r = client.post("/api/live/orders", json={
+        "account_id": "acc1", "symbol": "600000.SH", "side": "buy", "qty": 100,
+        "price_policy": "limit", "limit_price": 10.0,
+    })
+    # 非交易时段 trading_session 会拒, 但行情校验已通过 (不是 400 行情错误)
+    body = r.json()
+    if r.status_code == 400:
+        assert "行情" not in body.get("detail", "")  # 可能是交易时段拒绝, 但不是行情缺失
+    else:
+        assert body["verdict"] in ("pass", "reject")
+
+
+def test_events_publish_live_trading_type(client: TestClient, tmp_path: Path):
+    """提交意图后 events.bus 收到 live_trading 类型事件 (SSE 推送链路)."""
+    from app.services.events import bus
+    from app.trading import store
+
+    client.post("/api/live/accounts", json={
+        "account_id": "acc1", "broker": "mock", "display_name": "主",
+    })
+    store.upsert_account_snapshot(tmp_path, {
+        "account_id": "acc1", "as_of": "2026-10-21T10:00:00+08:00",
+        "cash": 1_000_000, "frozen_cash": 0, "market_value": 0,
+        "total": 1_000_000, "nav": 1_000_000, "mode": "disarmed",
+    })
+    client.post("/api/live/reconciliation/run?account=acc1")
+    client.post("/api/live/arm?account=acc1")
+
+    q = bus.subscribe()
+    client.post("/api/live/orders", json={
+        "account_id": "acc1", "symbol": "600000.SH", "side": "buy", "qty": 100,
+        "price_policy": "next_open", "limit_price": 10.0,
+    })
+    # 收到 live_trading 事件
+    found = False
+    for _ in range(10):
+        try:
+            ev = q.get_nowait()
+            if ev.get("type") == "live_trading":
+                found = True
+                break
+        except Exception:
+            break
+    bus.unsubscribe(q)
+    assert found, "未收到 live_trading 类型事件"
+
+
 def test_autonomy_l1_rejects_l2(client: TestClient):
     """本版拒绝创建 level=2 授权 (L3 有界自治未启用)."""
     client.post("/api/live/accounts", json={
@@ -117,3 +220,94 @@ def test_autonomy_l1_create_and_revoke(client: TestClient):
     r = client.post(f"/api/live/autonomy/{grant_id}/revoke")
     assert r.status_code == 200
     assert r.json()["ok"] is True
+
+
+def test_executions_empty(client: TestClient):
+    """无成交时 /api/live/executions 返回空列表."""
+    r = client.get("/api/live/executions")
+    assert r.status_code == 200
+    assert r.json()["executions"] == []
+
+
+def test_executions_filter_and_pagination(client: TestClient, tmp_path: Path):
+    """成交明细: account/order 过滤 + limit/offset 分页."""
+    from app.trading import store
+    client.post("/api/live/accounts", json={
+        "account_id": "acc1", "broker": "mock", "display_name": "主",
+    })
+    # 插入 intent + order (满足外键约束), 再注入成交
+    store._execute_write(tmp_path, lambda conn: conn.execute(
+        "INSERT INTO trade_intents(intent_id, account_id, symbol, side, qty,"
+        " price_policy, tif, source, dedupe_key, proposed_at, ruleset_version, rationale, status)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'approved')",
+        ("int1", "acc1", "600000.SH", "buy", 100, "limit", "day", "manual",
+         "dk1", "2026-10-21T10:00:00+08:00", "v1", "测试"),
+    ))
+    store.insert_order(tmp_path, {
+        "order_id": "ord1", "broker_order_id": "bk1",
+        "account_id": "acc1", "intent_id": "int1",
+        "symbol": "600000.SH", "side": "buy", "qty": 300,
+        "price_policy": "limit", "limit_price": 10.0,
+        "state": "partially_filled", "filled_qty": 300, "avg_fill_price": 11.0,
+        "submitted_at": "2026-10-21T10:00:00+08:00",
+        "last_update_at": "2026-10-21T10:05:00+08:00",
+        "reject_reason": None,
+    })
+    for i in range(3):
+        store.insert_execution(tmp_path, {
+            "exec_id": f"ex_{i}", "order_id": "ord1",
+            "broker_order_id": "bk1", "broker_trade_id": f"bt_{i}",
+            "account_id": "acc1", "symbol": "600000.SH", "side": "buy",
+            "qty": 100, "price": 10.0 + i, "fee": 0.0,
+            "ts": f"2026-10-21T10:0{i}:00+08:00",
+            "dedupe_key": f"mock:acc1:bt_{i}",
+        })
+    # 全量
+    r = client.get("/api/live/executions")
+    assert len(r.json()["executions"]) == 3
+    # account 过滤
+    r = client.get("/api/live/executions?account=acc1")
+    assert len(r.json()["executions"]) == 3
+    r = client.get("/api/live/executions?account=nope")
+    assert len(r.json()["executions"]) == 0
+    # order_id 过滤
+    r = client.get("/api/live/executions?order_id=ord1")
+    assert len(r.json()["executions"]) == 3
+    # 分页
+    r = client.get("/api/live/executions?limit=2&offset=0")
+    assert len(r.json()["executions"]) == 2
+    r = client.get("/api/live/executions?limit=2&offset=2")
+    assert len(r.json()["executions"]) == 1
+    # 单订单端点
+    r = client.get("/api/live/orders/ord1/executions")
+    assert r.status_code == 200
+    assert len(r.json()["executions"]) == 3
+
+
+def test_orders_pagination(client: TestClient, tmp_path: Path):
+    """订单列表 limit/offset 分页."""
+    from app.trading import store
+    client.post("/api/live/accounts", json={
+        "account_id": "acc1", "broker": "mock", "display_name": "主",
+    })
+    for i in range(5):
+        store._execute_write(tmp_path, lambda conn, _i=i: conn.execute(
+            "INSERT INTO trade_intents(intent_id, account_id, symbol, side, qty,"
+            " price_policy, tif, source, dedupe_key, proposed_at, ruleset_version, rationale, status)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'approved')",
+            (f"int_{i}", "acc1", "600000.SH", "buy", 100, "limit", "day", "manual",
+             f"dk_{i}", "2026-10-21T10:00:00+08:00", "v1", "测试"),
+        ))
+        store.insert_order(tmp_path, {
+            "order_id": f"ord_{i}", "broker_order_id": None,
+            "account_id": "acc1", "intent_id": f"int_{i}",
+            "symbol": "600000.SH", "side": "buy", "qty": 100,
+            "price_policy": "limit", "limit_price": 10.0,
+            "state": "created", "filled_qty": 0, "avg_fill_price": None,
+            "submitted_at": None, "last_update_at": f"2026-10-21T10:0{i}:00+08:00",
+            "reject_reason": None,
+        })
+    r = client.get("/api/live/orders?limit=2")
+    assert len(r.json()["orders"]) == 2
+    r = client.get("/api/live/orders?limit=2&offset=4")
+    assert len(r.json()["orders"]) == 1

@@ -32,6 +32,10 @@ SCOPES = (
     "read:analysis",
     "run:backtest",
     "paper:trade",
+    "live:read",
+    "live:propose",
+    "live:approve",
+    "live:admin",
 )
 
 TOKEN_PREFIX = "tsp_"

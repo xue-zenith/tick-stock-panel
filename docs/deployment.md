@@ -206,3 +206,44 @@ ssh -L 3018:127.0.0.1:3018 root@123.45.67.89
 - **本机/内网如何判断?** 后端检查客户端 IP 是否属于 `127.0.0.1 / ::1 / 10.x / 192.168.x / 172.16-31.x`。
 - **SSH 转发为什么有效?** `-L` 把本机端口通过 SSH 隧道转发到服务器的 `127.0.0.1`,等同于在服务器本地访问,客户端 IP 变成 `127.0.0.1`,通过校验。
 - **反向代理注意:** 若面板在 Nginx 等反代之后,需正确配置 `X-Forwarded-For` 头,后端据此取真实客户端 IP。
+
+---
+
+## 实盘交易模块
+
+面板内置实盘交易模块（侧栏「实盘」入口），与模拟盘（`/api/paper/*`）严格隔离。实盘交易走独立的 `app/trading` 域模块 + `/api/live/*` 端点，使用 SQLite WAL 存储（`data/live_trading.db`），不触碰模拟盘的 `fills.jsonl`。
+
+### 安全模型
+
+实盘交易遵循 fail-closed 原则：
+
+- **启动默认 DISARMED**（只读），需人工 Arm + 干净对账才能进入 ARMED_MANUAL
+- **AI 只到 L1**（建议），不自动下单；AUTO_L2/L3 接口预留但不激活
+- **逐笔人工审批**，审批绑定不可变订单快照，超期/已决策不可二次审批
+- **行情价格校验**：limit/market 单需实时行情快照，行情不可用时 fail-closed 拒单；next_open/close 盘后单不依赖盘中行情
+- **幂等**：同一 dedupe_key 最多产生一个实盘订单；每个券商成交编号最多入账一次
+
+### API 权限 scope
+
+外部 API Token 访问 `/api/live/*` 需持有对应 scope（UI 会话默认全部，不受约束）：
+
+| Scope | 端点 |
+|---|---|
+| `live:read` | GET accounts/orders/executions/approvals/health/reconciliation/scheduler/autonomy |
+| `live:propose` | POST /api/live/orders（提交交易意图） |
+| `live:approve` | POST /api/live/approvals/*, DELETE /api/live/orders/*（审批 + 撤单） |
+| `live:admin` | POST accounts/arm/disarm/reconciliation/run/scheduler/run-now/autonomy |
+
+### 实时推送
+
+实盘页面通过 SSE（`/api/events` 票据制）监听 `live_trading` 事件类型，订单状态变更、成交回报、对账差异、模式切换会自动推送到前端，无需手动刷新。SSE 连接生命周期绑定实盘页面，离开页面自动关闭。
+
+### 券商适配器
+
+当前默认注册 MockBroker（内存测试适配器，默认 100 万初始资金），用于端到端验证 OMS 闭环。真实券商适配器（XtQuant/QMT、Futu、IBKR）需实现 `BrokerAdapter` 协议（`backend/app/trading/brokers/base.py`）后在扩展 startup 时注册。未注册适配器的账户对账走空对账路径。
+
+### 部署注意事项
+
+- **数据隔离**：`data/live_trading.db` 是实盘账本，包含意图/审批/风控/回报/审计，不与模拟盘数据混用
+- **对账调度器**：后台 asyncio 任务，启动即跑一次 boot reconcile，之后按 30s（订单）/60s（持仓）/15:05（日终）周期对账
+- **首次使用**：创建账户 → 手动对账（或等调度器）→ Arm → 提交意图（next_open 策略可绕开交易时段限制）→ 审批 → 成交

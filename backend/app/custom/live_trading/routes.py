@@ -2,8 +2,8 @@
 
 路由前缀 /api/live, 通过 BackendExtensionRegistrar 注册, 不修改核心路由。
 镜像 paper.py API 的设计: _data_dir = request.app.state.repo.store.data_dir,
-HTTPException 包裹 ValueError。未对 api_gateway 添加 live:trade scope,
-端点仅 UI 会话可达 (与 /api/paper/* 同语义)。
+HTTPException 包裹 ValueError。api_gateway 规则表按 live:read / live:propose / live:approve / live:admin
+拆分 scope (见 app/services/api_gateway.py); UI 会话默认全 scope。
 """
 from __future__ import annotations
 
@@ -36,6 +36,38 @@ def _acc_validator(account_id: str) -> str:
     ) or len(account_id) > 64:
         raise HTTPException(status_code=400, detail=f"非法账户 ID: {account_id!r}")
     return account_id
+
+
+def _fetch_quote_snapshot(request: Request, symbol: str) -> dict:
+    """从平台 enriched 实时缓存取标的行情快照 (last_price/prev_close/涨跌停).
+
+    复用 quote_service.get_enriched_today() 的 polars DataFrame, 按 symbol 过滤。
+    缺失列或无数据时返回空 dict (risk_ctx 对应字段为 None → fail-closed)。
+    不触发网络请求, 只读内存缓存; 非交易时段或行情未启动时快照可能为空。
+    """
+    try:
+        svc = getattr(request.app.state, "quote_service", None)
+        if svc is None:
+            return {}
+        df, _ = svc.get_enriched_today()
+        if df is None or df.is_empty() or "symbol" not in df.columns:
+            return {}
+        row = df.filter(df["symbol"] == symbol)
+        if row.is_empty():
+            return {}
+        r = row.row(0, named=True)
+        result: dict[str, float | None] = {}
+        # enriched 的 close 即最新价 (CONTRIBUTING.md §3.2)
+        import contextlib
+        for col in ("close", "limit_up_price", "limit_down_price", "prev_close"):
+            val = r.get(col)
+            if val is not None:
+                with contextlib.suppress(TypeError, ValueError):
+                    result["last_price" if col == "close" else col] = float(val)
+        return result
+    except Exception:  # noqa: BLE001 — 行情快照失败不阻塞下单, fail-closed 由风控处理
+        logger.warning("_fetch_quote_snapshot failed for %s", symbol, exc_info=True)
+        return {}
 
 
 # ── Pydantic 模型 ────────────────────────────────────────
@@ -102,30 +134,49 @@ def _register(router: APIRouter) -> None:
         request: Request,
         status: str | None = None,
         account: str | None = Query(None),
+        limit: int | None = Query(None, ge=1, le=1000),
+        offset: int = Query(0, ge=0),
     ):
         store.init_db(_data_dir(request))
-        return {"orders": oms.list_orders(_data_dir(request), status=status, account_id=account)}
+        return {"orders": oms.list_orders(
+            _data_dir(request), status=status, account_id=account,
+            limit=limit, offset=offset,
+        )}
 
     @router.post("/orders")
     def submit_intent(request: Request, body: IntentModel):
-        """提交交易意图 → 风控 → 待审批 (不自动执行)."""
+        """提交交易意图 → 风控 → 待审批 (不自动执行).
+
+        行情价格校验: 优先取平台实时 enriched 快照 (last_price/prev_close/
+        limit_up_price/limit_down_price) 注入 risk_ctx; 快照缺失时 fail-closed
+        (last_price=None → risk._check_limit_bounds 返回 REJECT)。
+        """
         d = _data_dir(request)
         store.init_db(d)
         acc = store.get_account(d, body.account_id)
         if acc is None:
             raise HTTPException(status_code=404, detail="账户不存在")
-        # 构造风控上下文 (此处简化: 用最近快照; 真实生产由调用方或 OMS 注入行情)
         snap = store.latest_account_snapshot(d, body.account_id) or {}
         mode = TradingMode(acc.get("mode", "disarmed"))
+        # 行情快照: 从平台 enriched 缓存取标的实时价格 + 涨跌停判定价
+        quote = _fetch_quote_snapshot(request, body.symbol)
+        # fail-closed: limit/market 单需要实时行情; 行情不可用时拒绝 (蓝图 §10.1)
+        # NEXT_OPEN/CLOSE 是盘后管道, 不依赖盘中行情
+        if body.price_policy in ("limit", "market") and quote.get("last_price") is None:
+            raise HTTPException(
+                status_code=400,
+                detail="实时行情不可用, 无法校验价格 (limit/market 单需要实时行情快照)",
+            )
         from app.trading import risk as risk_mod
         ctx = risk_mod.build_ctx(
             account_id=body.account_id,
             mode=mode,
             cash=snap.get("cash", 0),
             total=snap.get("total", 0),
-            last_price=body.limit_price,
-            prev_close=body.limit_price,
-            limit_up_price=None, limit_down_price=None,
+            last_price=quote.get("last_price"),
+            prev_close=quote.get("prev_close"),
+            limit_up_price=quote.get("limit_up_price"),
+            limit_down_price=quote.get("limit_down_price"),
             position_qty=0,
             available_qty=store.available_qty(d, body.account_id, body.symbol),
         )
@@ -157,6 +208,29 @@ def _register(router: APIRouter) -> None:
     def order_events(request: Request, order_id: str):
         store.init_db(_data_dir(request))
         return {"events": store.list_order_events(_data_dir(request), order_id)}
+
+    @router.get("/orders/{order_id}/executions")
+    def order_executions(request: Request, order_id: str):
+        """单订单成交明细 (与 /events 对称)."""
+        store.init_db(_data_dir(request))
+        return {"executions": store.list_executions(_data_dir(request), order_id)}
+
+    # ── 成交明细 ─────────────────────────
+    @router.get("/executions")
+    def list_executions(
+        request: Request,
+        account: str | None = Query(None),
+        order_id: str | None = Query(None),
+        limit: int | None = Query(None, ge=1, le=1000),
+        offset: int = Query(0, ge=0),
+    ):
+        """成交明细列表 (支持账户/订单过滤 + 服务端分页)."""
+        store.init_db(_data_dir(request))
+        return {"executions": oms.list_executions(
+            _data_dir(request),
+            account_id=account, order_id=order_id,
+            limit=limit, offset=offset,
+        )}
 
     # ── 审批 ──────────────────────────────
     @router.get("/approvals")

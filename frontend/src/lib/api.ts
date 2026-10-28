@@ -1169,6 +1169,21 @@ export interface LiveOrderEvent {
   ts: string
 }
 
+export interface LiveExecution {
+  exec_id: string
+  order_id: string
+  broker_order_id: string | null
+  broker_trade_id: string
+  account_id: string
+  symbol: string
+  side: 'buy' | 'sell'
+  qty: number
+  price: number
+  fee: number
+  ts: string
+  dedupe_key: string
+}
+
 export interface LiveIntentInput {
   account_id: string
   symbol: string
@@ -4439,6 +4454,18 @@ export const api = {
 
   liveOrderEvents: (id: string) =>
     request<{ events: LiveOrderEvent[] }>(`/api/live/orders/${encodeURIComponent(id)}/events`),
+
+  liveOrderExecutions: (id: string) =>
+    request<{ executions: LiveExecution[] }>(`/api/live/orders/${encodeURIComponent(id)}/executions`),
+
+  liveExecutions: (account?: string, orderId?: string, limit?: number, offset?: number) => {
+    const q = new URLSearchParams()
+    if (account) q.set('account', account)
+    if (orderId) q.set('order_id', orderId)
+    if (limit) q.set('limit', String(limit))
+    if (offset) q.set('offset', String(offset))
+    return request<{ executions: LiveExecution[] }>(`/api/live/executions${q.toString() ? `?${q}` : ''}`)
+  },
 
   liveApprovals: () =>
     request<{ approvals: LiveApprovalRow[] }>('/api/live/approvals'),

@@ -127,6 +127,7 @@ export const QK = {
   liveAll:              ['live'] as const,
   liveAccounts:         ['live', 'accounts'] as const,
   liveOrders:           (acc?: string) => ['live', 'orders', acc ?? ''] as const,
+  liveExecutions:      (acc?: string) => ['live', 'executions', acc ?? ''] as const,
   liveApprovals:        ['live', 'approvals'] as const,
   liveHealth:           (acc?: string) => ['live', 'health', acc ?? ''] as const,
   liveReconciliation:  ['live', 'reconciliation'] as const,

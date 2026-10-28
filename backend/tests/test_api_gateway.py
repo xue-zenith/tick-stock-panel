@@ -39,6 +39,13 @@ def test_create_rejects_unknown_scope(tmp_path: Path):
         api_tokens.create_token(tmp_path, "x", ["admin"])
 
 
+def test_live_scopes_accepted(tmp_path: Path):
+    """实盘 4 个 scope 可创建 Token (api_tokens.SCOPES 已收录)."""
+    for scope in ("live:read", "live:propose", "live:approve", "live:admin"):
+        record, _ = api_tokens.create_token(tmp_path, f"t_{scope}", [scope])
+        assert record["scopes"] == [scope]
+
+
 def test_verify_wrong_or_malformed_token(tmp_path: Path):
     _, plaintext = api_tokens.create_token(tmp_path, "t", ["read:market"])
     # 追加字符构造"哈希必不同"的伪 Token — 若替换末位字符, 原值恰好以该字符结尾时会撞上真 Token (1/16 概率)
@@ -68,6 +75,22 @@ def test_required_scope_mapping():
     assert f("POST", "/api/backtest/strategy/run") == "run:backtest"
     assert f("GET", "/api/paper/overview") == "paper:trade"
     assert f("POST", "/api/paper/orders") == "paper:trade"
+    # live — 实盘交易 scope 拆分 (蓝图 §14)
+    assert f("GET", "/api/live/accounts") == "live:read"
+    assert f("GET", "/api/live/orders") == "live:read"
+    assert f("GET", "/api/live/executions") == "live:read"
+    assert f("GET", "/api/live/approvals") == "live:read"
+    assert f("GET", "/api/live/health") == "live:read"
+    assert f("GET", "/api/live/scheduler") == "live:read"
+    assert f("POST", "/api/live/orders") == "live:propose"
+    assert f("POST", "/api/live/approvals/x/approve") == "live:approve"
+    assert f("DELETE", "/api/live/orders/ord1") == "live:approve"
+    assert f("POST", "/api/live/arm") == "live:admin"
+    assert f("POST", "/api/live/disarm") == "live:admin"
+    assert f("POST", "/api/live/reconciliation/run") == "live:admin"
+    assert f("POST", "/api/live/scheduler/run-now") == "live:admin"
+    assert f("POST", "/api/live/autonomy") == "live:admin"
+    assert f("POST", "/api/live/accounts") == "live:admin"
     assert f("GET", "/api/settings/api-tokens") is None          # Token 管理本身不开放
     assert f("GET", "/api/monitor-rules") is None                # V1 最小面外
     # 前缀混淆不误伤: /api/paperback 不得命中 /api/paper
