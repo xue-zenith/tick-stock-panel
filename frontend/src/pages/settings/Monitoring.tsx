@@ -151,7 +151,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
     try {
       await api.updateRealtimeMonitorConfig(cfg)
       qc.invalidateQueries({ queryKey: QK.preferences })
-    } catch (e) {
+    } catch (_e) {
       // 忽略 — Toast 已在 request 层处理
     }
   }, [qc])

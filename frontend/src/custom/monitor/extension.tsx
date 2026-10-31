@@ -196,7 +196,7 @@ export function Monitor() {
     enterTsRef.current = Date.now()
     markSeen()
     return () => leaveMonitorPage()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [])
 
   return (

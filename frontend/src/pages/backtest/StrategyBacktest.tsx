@@ -1165,7 +1165,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   // 刷新页面后: 从 localStorage 恢复未完成的回测任务
   useEffect(() => {
     tryReconnect()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [])
 
   useEffect(() => {
