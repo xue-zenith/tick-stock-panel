@@ -244,6 +244,14 @@ class QuoteService:
         # 异动边缘规则上次评估时间戳 (秒)。异动快照历史部分有 60s 缓存,
         # 但每次构建仍有全市场循环, 轮询线程里限频到 30s 一次。
         self._abnormal_last_eval = 0.0
+        # strategy 评估限频: 初始为当前时间, 让启动后第一轮 skip strategy
+        # (若初始 0.0, 则 now-0 远大于 60s, 首轮就跑 strategy 会卡死轮询线程)
+        # 策略型监控规则评估限频: strategy 规则跑全市场选股, 每 6s 轮询跑一遍
+        # 45 个策略会堵塞轮询线程 (quote_age 超标 → watchdog 误报池僵死)。
+        # 限频到每 60s 跑一次; 限频窗口内仅评估轻量规则 (signal/price/ladder/...)。
+        # 初始为当前时间, 让启动后第一轮 skip strategy (若初始 0.0 则首轮就跑会卡死)
+        self._strategy_last_eval = time.time()
+        self._strategy_eval_interval = 60.0
 
         # 拉取元信息 (给 SSE / status 用)
         self._fetch_time: float = 0.0       # perf_counter (用于计算 quote_age_ms)
@@ -1274,7 +1282,24 @@ class QuoteService:
                         if engine.has_rule_type("volume_delta"):
                             eval_df = self._inject_volume_delta(eval_df)
                         eval_df = self._inject_intraday_signals(eval_df, engine, "stock")
-                        rule_events = engine.evaluate(eval_df, asset_type="stock")
+                        # strategy 规则限频: 每轮都评估轻量规则, strategy 规则按
+                        # _strategy_eval_interval (60s) 限频, 避免堵塞轮询线程。
+                        _now = time.time()
+                        _last_strategy_eval = getattr(self, "_strategy_last_eval", 0.0)
+                        _strategy_interval = getattr(self, "_strategy_eval_interval", 60.0)
+                        _skip_strat = (_now - _last_strategy_eval) < _strategy_interval
+                        try:
+                            rule_events = engine.evaluate(
+                                eval_df, asset_type="stock", skip_strategy=_skip_strat,
+                            )
+                        except TypeError as exc:
+                            # Keep lightweight test/custom monitor adapters compatible
+                            # with the pre-limit evaluate(df, asset_type) contract.
+                            if "skip_strategy" not in str(exc):
+                                raise
+                            rule_events = engine.evaluate(eval_df, asset_type="stock")
+                        if not _skip_strat:
+                            self._strategy_last_eval = _now
                         if engine.consume_strategy_result_updates():
                             self.notify_strategy_results_updated()
                     if engine.has_rule_type("sector"):
@@ -1409,9 +1434,19 @@ class QuoteService:
                         strict=False,
                     ))
                     paper_events: list[dict] = []
+                    enriched_rows = enriched_today.to_dicts() if stock_ready else []
                     for acc_id in paper_trading.list_account_ids(data_dir):
                         paper_events.extend(
                             paper_trading.evaluate_intraday(data_dir, snapshot, account_id=acc_id))
+                        # HRAE 只消费本轮标准化实时快照, 不读取供应商原始响应。
+                        # 信号先生成订单意图, 仍由 paper.create_order 做全部确定性校验。
+                        if stock_ready:
+                            hrae_orders = paper_auto.on_quote_snapshot(
+                                data_dir,
+                                enriched_rows,
+                                account_id=acc_id,
+                            )
+                            paper_events.extend(paper_auto.auto_order_events(hrae_orders, account_id=acc_id))
                         if rule_events:
                             created = paper_auto.on_rule_events(data_dir, rule_events, account_id=acc_id)
                             paper_events.extend(paper_auto.auto_order_events(created, account_id=acc_id))

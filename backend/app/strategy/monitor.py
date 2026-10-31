@@ -590,7 +590,8 @@ class MonitorRuleEngine:
         )
 
     def evaluate(self, df: pl.DataFrame, asset_type: str = "stock",
-                 reset_strategy_results: bool = True) -> list[dict]:
+                 reset_strategy_results: bool = True,
+                 skip_strategy: bool = False) -> list[dict]:
         """行情更新后评估规则。
 
         按 asset_type 只评估匹配资产类型的规则; ETF 规则应传 ETF enriched 快照。
@@ -620,7 +621,7 @@ class MonitorRuleEngine:
         matrix_rules: list[dict] = []
         params_map: dict[str, dict] = {}
         overrides_map: dict[str, dict] = {}
-        if self._strategy_engine is not None:
+        if self._strategy_engine is not None and not skip_strategy:
             for rule in list(self._rules.values()):
                 if (
                     not rule.get("enabled", True)
@@ -699,6 +700,8 @@ class MonitorRuleEngine:
             if rule.get("type") in ("sector", "abnormal", "date"):
                 # 三者不走行情 DataFrame 评估, 各走 evaluate_sectors / evaluate_abnormal /
                 # evaluate_date_rules 专用路径
+                continue
+            if skip_strategy and rule.get("type") == "strategy":
                 continue
             try:
                 events.extend(self._evaluate_rule(df, rule, now))
@@ -1311,7 +1314,8 @@ class MonitorRuleEngine:
                       if getattr(s, "execution_backend", "polars_expr") == "matrix_native"
                       else None),
                 overrides=overrides,
-                params=dict(overrides.get("params") or {}),
+                params={**dict(overrides.get("params") or {}),
+                        "__realtime_monitor": getattr(self, "_active_matrix_snapshots", {}).get(at) is not None},
             )
         except Exception as e:
             logger.warning("策略 %s 执行失败: %s", sid, e)
