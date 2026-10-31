@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import importlib.util
 import logging
 import threading
 from collections.abc import Callable
@@ -194,6 +195,56 @@ def _disconnect_instances(broker_name: str | None) -> None:
 def list_registered() -> list[str]:
     """已注册的 broker 名称列表。"""
     return sorted(_REGISTRY.keys())
+
+
+def register_optional_vendor_adapters(data_dir=None) -> list[str]:
+    """Register only SDKs that are actually installed in this process.
+
+    Vendor terminals remain an explicit runtime prerequisite.  A missing SDK is
+    intentionally left unregistered so the UI reports ``sdk_required`` rather
+    than pretending that a real account can be connected.
+    """
+    registered: list[str] = []
+    config_rows = {}
+    if data_dir is not None:
+        from app.trading.brokers.credentials import GatewayConfigStore
+        config_rows = GatewayConfigStore(data_dir).load()
+
+    def config_for(broker: str, account_id: str) -> dict:
+        for row in config_rows.values():
+            if row.get("broker") == broker and (not row.get("account_id") or row.get("account_id") == account_id):
+                return dict(row)
+        return {"account_id": account_id}
+
+    if importlib.util.find_spec("futu") is not None:
+        from app.trading.brokers.futu import FutuBrokerAdapter
+        register(
+            "futu", lambda account_id: FutuBrokerAdapter(account_id, config_for("futu", account_id)),
+            label="富途 OpenD", kind="real",
+            capabilities=FutuBrokerAdapter("", {}).capabilities,
+            requirements=["安装 futu-api 与 OpenD", "完成 OpenD 登录/设备验证", "确认账户与市场权限"],
+        )
+        registered.append("futu")
+    if importlib.util.find_spec("ibapi") is not None:
+        from app.trading.brokers.ibkr import IbkrBrokerAdapter
+        register(
+            "ibkr", lambda account_id: IbkrBrokerAdapter(account_id, config_for("ibkr", account_id)),
+            label="Interactive Brokers / TWS", kind="real",
+            capabilities=IbkrBrokerAdapter("", {}).capabilities,
+            requirements=["安装官方 TWS API ibapi", "启动 TWS/IB Gateway 并开启 Socket API", "先使用 Paper + Read-Only 完成验证"],
+        )
+        registered.append("ibkr")
+    # QMT remains Windows/MiniQMT-bound; register only when XtQuant is present.
+    if importlib.util.find_spec("xtquant") is not None:
+        from app.trading.brokers.xtquant import XtQuantBrokerAdapter
+        register(
+            "qmt", lambda account_id: XtQuantBrokerAdapter(account_id, config_for("qmt", account_id)),
+            label="QMT / XtQuant", kind="real",
+            capabilities=XtQuantBrokerAdapter("", {}).capabilities,
+            requirements=["Windows 64 位 + MiniQMT/QMT", "Python 3.11 与 userdata_mini", "券商开通程序化交易权限"],
+        )
+        registered.append("qmt")
+    return registered
 
 
 def _mock_factory(account_id: str) -> MockBrokerAdapter:
