@@ -1,7 +1,8 @@
 import { useEffect, useRef, useMemo, useState } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
-import * as echarts from 'echarts'
-import type { ECharts, EChartsOption } from 'echarts'
+import { echarts } from '@/lib/echarts'
+import type { ECharts } from 'echarts/core'
+import type { EChartsOption } from 'echarts'
 import type { KlineRow, LevelSeries } from '@/lib/api'
 
 /**

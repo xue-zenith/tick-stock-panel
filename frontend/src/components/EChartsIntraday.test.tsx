@@ -9,7 +9,7 @@ const chart = vi.hoisted(() => ({
   on: vi.fn(), off: vi.fn(), setOption: vi.fn(), clear: vi.fn(), resize: vi.fn(), dispose: vi.fn(),
   getZr: () => ({ on: vi.fn(), off: vi.fn() }),
 }))
-vi.mock('echarts', () => ({ init: () => chart }))
+vi.mock('@/lib/echarts', () => ({ echarts: { init: () => chart } }))
 vi.mock('@/lib/theme', () => ({ useChartTheme: () => ({}) }))
 const rows = [
   { datetime: '2026-09-09 09:30:00', open: 119.77, high: 119.77, low: 119, close: 119.1, volume: 100, amount: 1191000 },

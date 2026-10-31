@@ -18,7 +18,7 @@ const chart = vi.hoisted(() => ({
   convertFromPixel: () => [0, 0],
 }))
 
-vi.mock('echarts', () => ({ init: () => chart }))
+vi.mock('@/lib/echarts', () => ({ echarts: { init: () => chart } }))
 
 // 超过 COMPACT_THRESHOLD(60): 切标的后 dataZoom 一响就会走紧凑态转换, 进而重写 markPoint
 const DAYS = Array.from({ length: 62 }, (_, i) =>

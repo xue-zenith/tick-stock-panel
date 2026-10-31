@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { test } from 'vitest'
 import { QueryClient, QueryObserver } from '@tanstack/react-query'
 import { scheduleNeighborPrefetch } from './neighborPrefetch.ts'
 

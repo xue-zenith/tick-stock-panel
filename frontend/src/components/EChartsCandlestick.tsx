@@ -1,8 +1,9 @@
 import { useEffect, useRef, useCallback, useMemo } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import { fmtPct } from '@/lib/format'
-import * as echarts from 'echarts'
-import type { ECharts, EChartsOption } from 'echarts'
+import { echarts } from '@/lib/echarts'
+import type { ECharts } from 'echarts/core'
+import type { EChartsOption } from 'echarts'
 
 export interface OHLC {
   date: string

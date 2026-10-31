@@ -9,7 +9,8 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import * as echarts from 'echarts'
+import { echarts } from '@/lib/echarts'
+import type { EChartsOption } from 'echarts'
 import {
   Activity, RefreshCw, Loader2, Gauge, TrendingUp, TrendingDown, Minus,
   Pencil, CalendarDays, Repeat, Rows3, LayoutGrid, Flame, Layers, Filter, X,
@@ -86,7 +87,7 @@ function isPresetKey(p: RangePreset, k: '1y' | '2y' | 'all'): boolean {
 
 // ── EChart hook ───────────────────────────────────────────
 function useEChart(
-  option: echarts.EChartsOption | null,
+  option: EChartsOption | null,
   deps: unknown[],
   onReady?: (inst: echarts.ECharts) => void,
 ) {
@@ -306,7 +307,7 @@ export function Regime() {
 
 
   // 阶段时间轴: 高度折线 + 2板以上宽度柱 + 晋级率曲线, 背景色带=情绪周期阶段
-  const phaseOption = useMemo<echarts.EChartsOption | null>(() => {
+  const phaseOption = useMemo<EChartsOption | null>(() => {
     if (rows.length === 0 || !hasPhaseData) return null
     const dates = rows.map(r => r.date)
     const heights = rows.map(r => r.max_consecutive)
@@ -458,7 +459,7 @@ export function Regime() {
   }, [phaseChartInst, phaseOption, rows])
 
   // 趋势图: 综合分主线 + 4 子维度曲线(可切换) + 状态背景色带 + 涨停数柱状
-  const trendOption = useMemo<echarts.EChartsOption | null>(() => {
+  const trendOption = useMemo<EChartsOption | null>(() => {
     if (rows.length === 0) return null
     const dates = rows.map(r => r.date)
     const scores = rows.map(r => r.score)
@@ -550,7 +551,7 @@ export function Regime() {
   const trendRef = useEChart(trendOption, [trendOption, view])
 
   // 状态分布饼图
-  const pieOption = useMemo<echarts.EChartsOption | null>(() => {
+  const pieOption = useMemo<EChartsOption | null>(() => {
     const dist = states.data?.distribution ?? []
     if (dist.length === 0) return null
     return {

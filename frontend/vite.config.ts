@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import path from 'node:path'
 
@@ -38,17 +38,28 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
+    // ECharts 经过按需注册后约 654 kB; 这是共享 vendor chunk 的明确预算,
+    // 避免用手工拆分制造循环依赖或仅靠提高阈值掩盖未优化的大包。
+    chunkSizeWarningLimit: 700,
     rollupOptions: {
       output: {
         // 把重型图表库拆到独立 chunk, 避免打进主包 + 让页面按需加载。
         // 用函数形式按 node_modules 路径匹配, 比对象形式更可靠。
         manualChunks(id) {
           if (id.includes('node_modules')) {
-            if (id.includes('echarts')) return 'echarts'
+            if (id.includes('/echarts')) return 'echarts-core'
             if (id.includes('lightweight-charts')) return 'lightweight-charts'
           }
         },
       },
     },
+  },
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+    environmentOptions: {
+      jsdom: { url: 'http://localhost/' },
+    },
+    exclude: ['**/node_modules/**', '**/dist/**'],
   },
 })

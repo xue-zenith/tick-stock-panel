@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { test } from 'node:test'
+import { resolve } from 'node:path'
+import { test } from 'vitest'
 
 const source = readFileSync(
-  new URL('./DimensionMembersDialogContent.tsx', import.meta.url),
+  resolve(process.cwd(), 'src/components/DimensionMembersDialogContent.tsx'),
   'utf8',
 )
 

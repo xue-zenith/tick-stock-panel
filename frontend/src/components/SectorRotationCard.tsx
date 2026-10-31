@@ -13,7 +13,8 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import * as echarts from 'echarts'
+import { echarts } from '@/lib/echarts'
+import type { EChartsOption } from 'echarts'
 import { Activity, Database, RefreshCw } from 'lucide-react'
 import { api, type SectorRotationSector } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -88,7 +89,7 @@ function isMarketSessionNow(): boolean {
 }
 
 function useEChart(
-  option: echarts.EChartsOption | null,
+  option: EChartsOption | null,
   events?: {
     onMouseOver?: (params: HeatEventParams) => void
     onMouseOut?: (params: HeatEventParams) => void
@@ -331,7 +332,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
   const chartTheme = useChartTheme()
 
   // 展示图 (trend): 每个展示板块一条累计涨幅走势线, y = 桶内涨幅均值 (右轴 %)
-  const trendOption = useMemo<echarts.EChartsOption | null>(() => {
+  const trendOption = useMemo<EChartsOption | null>(() => {
     const heatSeries = data?.series
     if (!heatSeries || !heatSeries.sectors.length || !heatSeries.buckets.length) return null
     const buckets = heatSeries.buckets.slice(startCol)
@@ -419,7 +420,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
   }, displayMode)
 
   // 展示图 (heatmap): 行 = 展示板块, 色 = 该桶板块涨幅 (红涨绿跌)
-  const heatOption = useMemo<echarts.EChartsOption | null>(() => {
+  const heatOption = useMemo<EChartsOption | null>(() => {
     const heatSeries = data?.series
     if (!heatSeries || !heatSeries.sectors.length || !heatSeries.buckets.length) return null
     const names = displayNames.slice(0, heatRows)
@@ -544,7 +545,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
   // 强度图: 黄=切换强度 (左轴), 灰虚线=全市场, 蓝线=指数 (右轴 %); 窗口与展示图一致;
   // 领涨易主时点标注新领涨板块名: 可见窗口内取强度最高 2 个 (琥珀) 与最低 2 个 (灰色)
   // 常显, 不用 hideOverlap — 其余切换点仅 tooltip 可见, 避免密集切换时标签互相遮挡
-  const chartOption = useMemo<echarts.EChartsOption | null>(() => {
+  const chartOption = useMemo<EChartsOption | null>(() => {
     if (!timeline.length) return null
     const buckets = timeline.slice(startCol).map(point => point.time)
     if (!buckets.length) return null
