@@ -19,6 +19,7 @@ import logging
 import uuid
 from datetime import date as _date
 from datetime import datetime
+from math import isfinite
 from pathlib import Path
 
 from app.market_time import cn_now
@@ -46,14 +47,19 @@ def validate_rule(rule: dict) -> None:
     """校验规则字段, 非法抛 ValueError (中文信息)。"""
     if (rule.get("name") or "").strip() == "":
         raise ValueError("规则名称不能为空")
-    if rule.get("match_kind") not in ("strategy", "rule"):
-        raise ValueError(f"match_kind 非法: {rule.get('match_kind')!r} (应为 strategy / rule)")
+    if rule.get("match_kind") not in ("strategy", "rule", "wind"):
+        raise ValueError(f"match_kind 非法: {rule.get('match_kind')!r} (应为 strategy / rule / wind)")
     if not (rule.get("match_id") or "").strip():
         raise ValueError("match_id 不能为空")
     if rule.get("side") not in ("buy", "sell", "auto"):
         raise ValueError(f"side 非法: {rule.get('side')!r}")
     if rule.get("side") == "auto" and rule.get("match_kind") != "strategy":
         raise ValueError("side=auto (跟信号方向) 仅支持匹配策略 — 监控规则事件无方向语义")
+    if rule.get("match_kind") == "wind":
+        if rule.get("match_id") != "hrae":
+            raise ValueError("wind 规则的 match_id 必须为 hrae")
+        if rule.get("side") != "sell":
+            raise ValueError("wind 规则只允许卖出")
     if rule.get("size_mode") not in ("fixed_amount", "pct_equity"):
         raise ValueError(f"size_mode 非法: {rule.get('size_mode')!r}")
     value = rule.get("size_value")
@@ -100,6 +106,7 @@ def normalize_rule(rule: dict) -> dict:
     # 风控字段缺省 None (回落策略); 不做类型转换, 由 validate_rule 校验
     d.setdefault("stop_loss_pct", None)
     d.setdefault("max_hold_days", None)
+    d.setdefault("exit_config", {})
     return d
 
 
@@ -111,7 +118,7 @@ def load_auto_rules(data_dir: Path, account_id: str = paper.DEFAULT_ACCOUNT_ID, 
             if enabled_only and not r.get("enabled"):
                 continue
             out.append(r)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - malformed user rule is skipped and logged
             logger.warning("paper auto rule load failed %s: %s", f.name, e)
     return out
 
@@ -293,6 +300,314 @@ def on_rule_events(data_dir: Path, events: list[dict], account_id: str = paper.D
     return created
 
 
+# ── HRAE 实时风向退出 ─────────────────────────────────────────
+
+def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
+    return max(low, min(high, value))
+
+
+def _state_path(data_dir: Path, account_id: str, rule_id: str) -> Path:
+    return _dir(data_dir, account_id) / f"hrae_{rule_id}.json"
+
+
+def _load_hrae_state(data_dir: Path, account_id: str, rule_id: str) -> dict:
+    p = _state_path(data_dir, account_id, rule_id)
+    try:
+        value = json.loads(p.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_hrae_state(data_dir: Path, account_id: str, rule_id: str, state: dict) -> None:
+    atomic_write_text(_state_path(data_dir, account_id, rule_id), json.dumps(state, ensure_ascii=False, indent=2))
+
+
+def _row_float(row: dict, key: str) -> float | None:
+    value = row.get(key)
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if isfinite(result) else None
+
+
+def _market_score(rows: list[dict]) -> float | None:
+    """实时市场分: breadth + EMA20/60 趋势, 不混用指数百分数口径。"""
+    valid = [r for r in rows if _row_float(r, "raw_close") and _row_float(r, "change_pct") is not None]
+    if not valid:
+        return None
+    breadth = sum(1 if (_row_float(r, "change_pct") or 0) > 0 else -1 if (_row_float(r, "change_pct") or 0) < 0 else 0 for r in valid) / len(valid)
+    trend_values = []
+    for r in valid:
+        close, ema20, ema60 = (_row_float(r, k) for k in ("close", "ema20", "ema60"))
+        if close is not None and ema20 is not None and ema60 is not None and close > 0:
+            trend_values.append((1 if close >= ema20 else -1) * 0.6 + (1 if close >= ema60 else -1) * 0.4)
+    trend = sum(trend_values) / len(trend_values) if trend_values else 0.0
+    return _clamp(0.6 * breadth + 0.4 * trend)
+
+
+def _stock_score(row: dict) -> float | None:
+    close = _row_float(row, "close") or _row_float(row, "raw_close")
+    if close is None or close <= 0:
+        return None
+    parts: list[tuple[float, float]] = []
+    for field, weight in (("ema20", 0.30), ("ema60", 0.25)):
+        value = _row_float(row, field)
+        if value is not None and value > 0:
+            parts.append((1.0 if close >= value else -1.0, weight))
+    for field, weight, scale in (("momentum_5d", 0.20, 0.10), ("momentum_20d", 0.15, 0.20), ("change_pct", 0.10, 0.05)):
+        value = _row_float(row, field)
+        if value is not None:
+            parts.append((_clamp(value / scale), weight))
+    if not parts:
+        return None
+    return _clamp(sum(score * weight for score, weight in parts) / sum(weight for _, weight in parts))
+
+
+def _risk_multiplier(score: float, *, account: bool = False) -> float:
+    """HRAE-PBR 的分段乘数；阈值来自方案首轮候选，后续须样本外验证。"""
+    if score > -0.30:
+        return 1.0
+    if score > -0.50:
+        return 0.80 if account else 0.75
+    if score > -0.70:
+        return 0.55 if account else 0.40
+    return 0.25 if account else 0.0
+
+
+def _annualized_vol(row: dict) -> float:
+    value = _row_float(row, "annual_vol_20d")
+    if value is not None and value > 0:
+        return max(0.01, min(value, 3.0))
+    # 没有年化波动率时, 用 ATR/价格的保守年化近似; 不把缺失数据伪装成低风险。
+    close = _row_float(row, "close") or _row_float(row, "raw_close")
+    atr = _row_float(row, "atr_14")
+    if close and close > 0 and atr and atr > 0:
+        return max(0.01, min(atr / close * (252 ** 0.5), 3.0))
+    return 0.50
+
+
+def _portfolio_risk_snapshot(
+    account: dict,
+    positions: dict[str, dict],
+    rows: list[dict],
+    state: dict,
+    cfg: dict,
+    market_score: float,
+) -> tuple[dict, dict[str, dict]]:
+    """构造账户风险快照和持仓目标, 只计算不下单。
+
+    当前 provider 契约没有稳定的行业收益矩阵, 因此不虚构行业/协方差数据;
+    组合波动率采用带压力相关性的持仓波动率近似, 用于降仓而非加仓。
+    """
+    by_symbol = {str(r.get("symbol")): r for r in rows if r.get("symbol")}
+    holdings: dict[str, dict] = {}
+    market_value = 0.0
+    for symbol, pos in positions.items():
+        qty = int(pos.get("qty", 0))
+        row = by_symbol.get(symbol)
+        price = _row_float(row or {}, "raw_close") if row else None
+        if qty <= 0:
+            continue
+        price = price if price and price > 0 else float(pos.get("avg_cost") or 0)
+        value = qty * price
+        score = _stock_score(row or {}) if row else None
+        holdings[symbol] = {"value": value, "score": score if score is not None else 0.0, "vol": _annualized_vol(row or {})}
+        market_value += value
+    cash = float(account.get("cash") or 0.0)
+    equity = cash + market_value
+    initial = float(account.get("initial_cash") or 0.0)
+    previous = state.get("__portfolio__") if isinstance(state.get("__portfolio__"), dict) else {}
+    hwm = max(float(previous.get("high_water_mark") or 0.0), equity)
+    drawdown = max(0.0, 1.0 - equity / hwm) if hwm > 0 else 0.0
+    pnl = equity - initial
+
+    base = min(1.0, max(0.0, float(cfg.get("base_max_exposure", 0.85))))
+    target_vol = max(0.01, float(cfg.get("target_annual_volatility", 0.10)))
+    draw_warn = max(0.0, float(cfg.get("drawdown_warning", 0.04)))
+    draw_limit = max(draw_warn + 1e-9, float(cfg.get("drawdown_limit", 0.12)))
+    lock_rate = min(1.0, max(0.0, float(cfg.get("profit_lock_rate", 0.50))))
+    draw_floor = hwm * (1.0 - draw_limit)
+    profit_floor = initial + lock_rate * max(hwm - initial, 0.0)
+    capital_floor = max(draw_floor, profit_floor)
+    cushion = max(equity - capital_floor, 0.0)
+    current_exposure = market_value / equity if equity > 0 else 0.0
+
+    weighted_score = 0.0
+    weighted_vol = 0.0
+    if market_value > 0:
+        for item in holdings.values():
+            weight = item["value"] / market_value
+            weighted_score += weight * item["score"]
+            weighted_vol += weight * item["vol"]
+    account_score = _clamp(0.30 * market_score + 0.70 * weighted_score) if holdings else market_score
+    # 压力相关性 rho=0.25: 只会压低目标暴露, 不会在低波动时放大仓位。
+    variance = (1.0 - 0.25) * sum((item["value"] / equity * item["vol"]) ** 2 for item in holdings.values())
+    variance += 0.25 * (sum(item["value"] / equity * item["vol"] for item in holdings.values()) ** 2)
+    forecast_vol = variance ** 0.5 if variance > 0 else 0.0
+    vol_mult = min(1.0, target_vol / forecast_vol) if forecast_vol > 0 else 1.0
+    draw_mult = 1.0 if drawdown <= draw_warn else max(0.0, (draw_limit - drawdown) / (draw_limit - draw_warn))
+    account_mult = _risk_multiplier(account_score, account=True)
+    target_exposure = min(base, base * vol_mult, base * draw_mult, base * account_mult)
+    if equity <= capital_floor or drawdown >= draw_limit:
+        target_exposure = 0.0
+
+    dominant = "BASE"
+    constraints = {"BASE": base, "VOLATILITY": base * vol_mult, "DRAWDOWN": base * draw_mult, "HRAE": base * account_mult}
+    if equity <= capital_floor or drawdown >= draw_limit:
+        dominant = "CAPITAL_FLOOR"
+    else:
+        dominant = min(constraints, key=constraints.get)
+    risk_state = "HALT" if target_exposure <= 0 and (equity <= capital_floor or drawdown >= draw_limit) else "REDUCE" if target_exposure + 1e-9 < current_exposure else "CAUTION" if dominant != "BASE" else "NORMAL"
+    snapshot = {
+        "version": "hrae-pbr-v1",
+        "equity": round(equity, 2), "initial_equity": round(initial, 2),
+        "cash": round(cash, 2), "market_value": round(market_value, 2),
+        "cumulative_pnl": round(pnl, 2), "high_water_mark": round(hwm, 2),
+        "drawdown": round(drawdown, 6), "drawdown_floor": round(draw_floor, 2),
+        "profit_floor": round(profit_floor, 2), "capital_floor": round(capital_floor, 2),
+        "risk_cushion": round(cushion, 2), "current_exposure": round(current_exposure, 6),
+        "target_exposure": round(target_exposure, 6), "forecast_volatility": round(forecast_vol, 6),
+        "account_hrae_score": round(account_score, 6), "dominant_constraint": dominant,
+        "risk_state": risk_state, "updated_at": _now_iso(),
+    }
+    plan: dict[str, dict] = {}
+    rebalance_threshold = max(0.0, float(cfg.get("rebalance_threshold", 0.05)))
+    for symbol, item in holdings.items():
+        score = float(item["score"])
+        multiplier = _risk_multiplier(score)
+        position_cap = equity * min(1.0, max(0.0, float(cfg.get("single_position_cap", 0.10)))) * multiplier
+        target_value = min(item["value"], position_cap)
+        if current_exposure > 0 and target_exposure < current_exposure:
+            target_value = min(target_value, item["value"] * target_exposure / current_exposure)
+        reduction = max(0.0, 1.0 - target_value / item["value"]) if item["value"] > 0 else 0.0
+        if current_exposure - target_exposure < rebalance_threshold and score > -0.70 and equity > capital_floor:
+            reduction = 0.0
+        plan[symbol] = {"target_value": round(target_value, 2), "reduction_ratio": reduction, "score": score, "multiplier": multiplier}
+    state["__portfolio__"] = snapshot
+    return snapshot, plan
+
+
+def _hrae_order(data_dir: Path, account_id: str, rule: dict, symbol: str, price: float, reason: str, ratio: float) -> dict | None:
+    capacity = paper.sell_capacity(data_dir, symbol, account_id)
+    if capacity is None:
+        return None
+    available, pending = capacity
+    qty = paper.normalize_qty(int((available - pending) * ratio))
+    if qty <= 0:
+        return None
+    order, err = paper.create_order(
+        data_dir, symbol, "sell", account_id=account_id, qty=qty,
+        order_type="market", ref_price=price, source=f"auto_hrae:{rule['id']}",
+    )
+    if err:
+        logger.info("paper HRAE %s: %s 下单被拒: %s", rule["name"], symbol, err)
+        return None
+    order["reason"] = reason
+    # create_order 已完成校验和落盘; 将确定性触发原因补写进同一订单审计记录。
+    paper.save_order(data_dir, order, account_id)
+    return order
+
+
+def on_quote_snapshot(data_dir: Path, rows: list[dict], account_id: str = paper.DEFAULT_ACCOUNT_ID) -> list[dict]:
+    """用当前标准化快照评估 HRAE；只处理已持仓标的并统一走 paper.create_order。"""
+    rules = [r for r in load_auto_rules(data_dir, account_id, enabled_only=True) if r.get("match_kind") == "wind"]
+    if not rules or not rows:
+        return []
+    by_symbol = {str(r.get("symbol")): r for r in rows if r.get("symbol")}
+    market = _market_score(rows)
+    if market is None:
+        logger.warning("paper HRAE DATA_STALE: 缺少有效市场快照")
+        return []
+    positions = paper.load_positions(data_dir, account_id)
+    account = paper.get_account(data_dir, account_id)
+    if account is None:
+        return []
+    created: list[dict] = []
+    with paper.PAPER_LOCK:
+        for rule in rules:
+            state = _load_hrae_state(data_dir, account_id, rule["id"])
+            cfg = rule.get("exit_config") or {}
+            risk_snapshot, plan = _portfolio_risk_snapshot(
+                account, positions, rows, state, cfg, market,
+            )
+            observe = float(cfg.get("observe_threshold", -0.30))
+            reduce = float(cfg.get("reduce_threshold", -0.50))
+            exit_threshold = float(cfg.get("exit_threshold", -0.70))
+            confirm = max(1, int(cfg.get("consecutive_samples", 3)))
+            max_loss = abs(float(cfg.get("max_loss_pct", 0.08)))
+            atr_mult = float(cfg.get("atr_stop_atr", 2.5))
+            for symbol, pos in positions.items():
+                if int(pos.get("qty", 0)) <= 0 or symbol not in by_symbol:
+                    continue
+                row = by_symbol[symbol]
+                price = _row_float(row, "raw_close")
+                close = _row_float(row, "close") or price
+                if price is None or close is None or price <= 0:
+                    continue
+                item = state.setdefault(symbol, {"peak": price, "weak": 0, "stage": 0})
+                item["peak"] = max(float(item.get("peak", price)), price)
+                # 当前实时快照尚未提供行业/事件字段: 只在可用的市场+个股权重上归一化,
+                # 防止总分范围被锁在 [-0.7, 0.7] 而使 -0.70 强风险阈值失去语义。
+                score = _clamp((0.30 * market + 0.40 * (_stock_score(row) or 0.0)) / 0.70)
+                item["weak"] = int(item.get("weak", 0)) + 1 if score <= observe else 0
+                reason = None
+                ratio = 0.0
+                portfolio_action = plan.get(symbol) or {}
+                portfolio_ratio = float(portfolio_action.get("reduction_ratio") or 0.0)
+                avg_cost = float(pos.get("avg_cost") or 0)
+                atr = _row_float(row, "atr_14")
+                stop = avg_cost * (1 - max_loss) if avg_cost > 0 else 0
+                # atr_14 基于 enriched 价格; 换算到 raw_close 后再与原始成交价比较。
+                if avg_cost > 0 and atr is not None and close > 0:
+                    raw_atr = atr / close * price
+                    stop = max(stop, avg_cost - atr_mult * raw_atr)
+                if stop > 0 and price <= stop:
+                    reason, ratio = f"HRAE硬止损 score={score:.3f}", 1.0
+                elif score <= exit_threshold and item["weak"] >= confirm:
+                    reason, ratio = f"HRAE强风险 score={score:.3f}", 1.0
+                elif score <= reduce and item["weak"] >= confirm and int(item.get("stage", 0)) < 1:
+                    reason, ratio = f"HRAE风向转弱 score={score:.3f}", 0.5
+                if portfolio_ratio > ratio:
+                    ratio = portfolio_ratio
+                    reason = (
+                        f"HRAE-PBR组合减仓 exposure={risk_snapshot['current_exposure']:.2%}"
+                        f"→{risk_snapshot['target_exposure']:.2%}"
+                        f" constraint={risk_snapshot['dominant_constraint']}"
+                    )
+                if reason:
+                    order = _hrae_order(data_dir, account_id, rule, symbol, price, reason, ratio)
+                    if order:
+                        item["stage"] = 2 if ratio >= 1 else 1
+                        order["reason"] = reason
+                        created.append(order)
+            _save_hrae_state(data_dir, account_id, rule["id"], state)
+    return created
+
+
+def get_hrae_risk_snapshot(
+    data_dir: Path,
+    rows: list[dict],
+    account_id: str = paper.DEFAULT_ACCOUNT_ID,
+) -> dict | None:
+    """返回当前账户 HRAE-PBR 风险快照, 供 API/前端只读展示。"""
+    rules = [r for r in load_auto_rules(data_dir, account_id, enabled_only=True) if r.get("match_kind") == "wind"]
+    account = paper.get_account(data_dir, account_id)
+    if not rules or account is None or not rows:
+        return None
+    market = _market_score(rows)
+    if market is None:
+        return None
+    state = _load_hrae_state(data_dir, account_id, rules[0]["id"])
+    snapshot, _ = _portfolio_risk_snapshot(
+        account, paper.load_positions(data_dir, account_id), rows,
+        state, rules[0].get("exit_config") or {}, market,
+    )
+    _save_hrae_state(data_dir, account_id, rules[0]["id"], state)
+    return snapshot
+
+
 _ORDER_TYPE_LABEL = {"market": "即时", "next_open": "次日开盘", "close": "当日收盘"}
 
 
@@ -303,7 +618,7 @@ def auto_order_events(created: list[dict], account_id: str = paper.DEFAULT_ACCOU
     events: list[dict] = []
     for o in created:
         source = str(o.get("source", ""))
-        rule_id = source.removeprefix("auto:") if source.startswith("auto:") else ""
+        rule_id = source.removeprefix("auto:") if source.startswith("auto:") else source.removeprefix("auto_hrae:") if source.startswith("auto_hrae:") else ""
         side_label = "买入" if o["side"] == "buy" else "卖出"
         type_label = _ORDER_TYPE_LABEL.get(o["order_type"], o["order_type"])
         events.append({
@@ -316,7 +631,8 @@ def auto_order_events(created: list[dict], account_id: str = paper.DEFAULT_ACCOU
             "side": o["side"],
             "qty": o["qty"],
             "account_id": account_id,
-            "message": f"自动跟单触发{side_label}下单 ({type_label}) {o['qty']}股",
+            "message": f"自动跟单触发{side_label}下单 ({type_label}) {o['qty']}股"
+            + (f" · {o['reason']}" if o.get("reason") else ""),
         })
     return events
 

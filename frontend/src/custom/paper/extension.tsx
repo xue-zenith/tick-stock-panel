@@ -15,7 +15,7 @@
  */
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import * as echarts from 'echarts'
+import { echarts } from '@/lib/echarts'
 import { Banknote, ChevronDown, ChevronUp, CircleDollarSign, GitCompare, History, ListChecks, PieChart, Plus, RefreshCw, Settings, ShieldAlert, SlidersHorizontal, Snowflake, Trash2, TrendingUp, Wallet, X, Zap } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { api, type PaperCompareRow, type PaperFill, type PaperHolding, type PaperOrder, type PaperRound } from '@/lib/api'
@@ -1170,6 +1170,7 @@ function CompareChart({ rows }: { rows: PaperCompareRow[] }) {
 function AutoRulesPanel({ acc }: { acc: string }) {
   const qc = useQueryClient()
   const rulesQ = useQuery({ queryKey: QK.paperAutoRules(acc), queryFn: () => api.paperAutoRules(acc) })
+  const riskQ = useQuery({ queryKey: QK.paperRisk(acc), queryFn: () => api.paperRiskSnapshot(acc), refetchInterval: 15_000 })
   const rules = rulesQ.data?.rules ?? []
   const [creating, setCreating] = useState(false)
 
@@ -1198,6 +1199,15 @@ function AutoRulesPanel({ acc }: { acc: string }) {
       <div className="mt-1 text-[11px] leading-relaxed text-muted">
         监控规则/策略触发时自动按规则下单 (默认次日开盘成交), 同标的 {`冷却 N 天`}内不重复触发
       </div>
+      {riskQ.data?.available && riskQ.data.snapshot && (
+        <div className="mt-3 grid grid-cols-2 gap-2 rounded-btn border border-border bg-base px-3 py-2 text-[11px] md:grid-cols-5">
+          <div><span className="text-muted">总资产</span><div className="font-mono">{fmtMoney(riskQ.data.snapshot.equity, 0)}</div></div>
+          <div><span className="text-muted">累计盈亏</span><div className={cn('font-mono', riskQ.data.snapshot.cumulative_pnl >= 0 ? 'text-bull' : 'text-bear')}>{fmtMoney(riskQ.data.snapshot.cumulative_pnl, 0)}</div></div>
+          <div><span className="text-muted">当前/目标仓位</span><div className="font-mono">{(riskQ.data.snapshot.current_exposure * 100).toFixed(1)}% / {(riskQ.data.snapshot.target_exposure * 100).toFixed(1)}%</div></div>
+          <div><span className="text-muted">回撤 / 风险状态</span><div className="font-mono">{(riskQ.data.snapshot.drawdown * 100).toFixed(1)}% · {riskQ.data.snapshot.risk_state}</div></div>
+          <div><span className="text-muted">主约束</span><div className="font-mono">{riskQ.data.snapshot.dominant_constraint}</div></div>
+        </div>
+      )}
       {rules.length === 0 ? (
         <div className="py-8 text-center text-xs text-muted">暂无规则 — 新建一条, 让策略信号自动进入模拟盘</div>
       ) : (
@@ -1206,7 +1216,7 @@ function AutoRulesPanel({ acc }: { acc: string }) {
             <div key={r.id} className="flex items-center gap-2 rounded-btn px-2 py-1.5 text-xs transition-colors hover:bg-elevated/40">
               <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', r.enabled ? 'bg-bear' : 'bg-muted')} />
               <span className="w-28 shrink-0 truncate font-medium">{r.name}</span>
-              <span className="w-20 shrink-0 text-muted">{r.match_kind === 'strategy' ? '跟策略' : '跟规则'}</span>
+              <span className="w-20 shrink-0 text-muted">{r.match_kind === 'strategy' ? '跟策略' : r.match_kind === 'wind' ? '风向退出' : '跟规则'}</span>
               <span className="w-32 shrink-0 truncate font-mono text-[11px] text-muted" title={r.match_id}>{r.match_id}</span>
               <span className={cn('w-8 shrink-0 font-medium', r.side === 'buy' ? 'text-bull' : r.side === 'sell' ? 'text-bear' : 'text-accent')} title={r.side === 'auto' ? '自动: 入场信号买入 · 出场信号全平' : undefined}>{r.side === 'auto' ? '自动' : r.side === 'buy' ? '买' : '卖'}</span>
               <span className="w-24 shrink-0 font-mono text-[11px] text-muted">
@@ -1236,7 +1246,7 @@ function AutoRulesPanel({ acc }: { acc: string }) {
 
 function AutoRuleForm({ acc, onDone, onCancel }: { acc: string; onDone: () => void; onCancel: () => void }) {
   const [name, setName] = useState('')
-  const [matchKind, setMatchKind] = useState<'strategy' | 'rule'>('strategy')
+  const [matchKind, setMatchKind] = useState<'strategy' | 'rule' | 'wind'>('strategy')
   const [matchId, setMatchId] = useState('')
   const [side, setSide] = useState<'buy' | 'sell' | 'auto'>('auto')
   const [sizeMode, setSizeMode] = useState<'fixed_amount' | 'pct_equity'>('fixed_amount')
@@ -1258,6 +1268,9 @@ function AutoRuleForm({ acc, onDone, onCancel }: { acc: string; onDone: () => vo
         order_type: orderType,
         cooldown_days: Number(cooldown),
         max_positions: Math.max(0, Math.round(Number(maxPositions) || 0)),
+        ...(matchKind === 'wind' ? {
+          exit_config: { observe_threshold: -0.30, reduce_threshold: -0.50, exit_threshold: -0.70, consecutive_samples: 3, max_loss_pct: 0.08, atr_stop_atr: 2.5 },
+        } : {}),
         enabled: true,
       }, acc),
     onSuccess: onDone,
@@ -1289,6 +1302,7 @@ function AutoRuleForm({ acc, onDone, onCancel }: { acc: string; onDone: () => vo
           hint: <span className="shrink-0 font-mono text-[10px] text-muted">{s.id}</span>,
         }))
     }
+    if (matchKind === 'wind') return []
     return (rulesQ.data?.rules ?? [])
       .filter(r => !idQuery || r.name.toLowerCase().includes(idQuery) || r.id.toLowerCase().includes(idQuery))
       .slice(0, 8)
@@ -1311,16 +1325,16 @@ function AutoRuleForm({ acc, onDone, onCancel }: { acc: string; onDone: () => vo
         <div>
           <label className="text-[11px] text-muted">跟什么</label>
           <div className="mt-1 flex gap-1.5">
-            {(['strategy', 'rule'] as const).map(k => (
-              <button key={k} onClick={() => { setMatchKind(k); setMatchId(''); setSide(s => (k === 'strategy' ? 'auto' : s === 'auto' ? 'buy' : s)) }}
+            {(['strategy', 'rule', 'wind'] as const).map(k => (
+              <button key={k} onClick={() => { setMatchKind(k); setMatchId(k === 'wind' ? 'hrae' : ''); setSide(k === 'wind' ? 'sell' : k === 'strategy' ? 'auto' : 'buy') }}
                 className={cn('flex-1 rounded-btn border py-1 text-[11px] transition-colors',
                   matchKind === k ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border text-muted hover:text-secondary')}>
-                {k === 'strategy' ? '跟策略' : '跟监控规则'}
+                {k === 'strategy' ? '跟策略' : k === 'rule' ? '跟监控规则' : '风向自动退出'}
               </button>
             ))}
           </div>
         </div>
-        <div className="md:col-span-2">
+        {matchKind !== 'wind' && <div className="md:col-span-2">
           <label className="text-[11px] text-muted">{matchKind === 'strategy' ? '策略 (输入中文名 / ID 联想, 留空聚焦看全部)' : '监控规则 (输入名称 / ID 联想)'}</label>
           <SuggestInput
             value={matchId}
@@ -1331,8 +1345,12 @@ function AutoRuleForm({ acc, onDone, onCancel }: { acc: string; onDone: () => vo
             placeholder={matchKind === 'strategy' ? '如: 前高突破 / sg_...' : '如: 高位放量 / mrule_...'}
             className="mt-1 w-full rounded-btn border border-border bg-base px-3 py-1.5 font-mono text-sm outline-none focus:border-accent/50"
           />
-        </div>
-        {matchKind === 'strategy' ? (
+        </div>}
+        {matchKind === 'wind' ? (
+          <div className="md:col-span-2 rounded-btn bg-warning/10 px-3 py-2 text-[11px] leading-5 text-secondary">
+            HRAE 分层风向退出：市场趋势 30% + 个股趋势 40%，连续 3 次确认；触发转弱减仓 50%，强风险或硬止损清仓。只作用于当前模拟盘持仓，默认不使用 AI 新闻分数。
+          </div>
+        ) : matchKind === 'strategy' ? (
           <div className="self-end pb-1.5 text-[10px] leading-4 text-muted">
             入场信号买入 · 出场信号全平
           </div>

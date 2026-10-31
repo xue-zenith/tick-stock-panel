@@ -62,7 +62,7 @@ def _resolve_asset_type(request: Request, symbol: str) -> str:
     repo = getattr(request.app.state, "repo", None)
     try:
         return repo.resolve_asset_type(symbol) if repo is not None else "stock"
-    except Exception:
+    except Exception:  # noqa: BLE001 - provider/repository failure must fail closed to stock
         logging.getLogger(__name__).warning(
             "resolve_asset_type failed for %s, falling back to stock", symbol, exc_info=True
         )
@@ -76,6 +76,7 @@ def _last_close(data_dir: Path, symbol: str, asset_type: str) -> float | None:
         return None
     try:
         import polars as pl
+
         from app.parquet import scan_parquet_compat
         df = (
             scan_parquet_compat((base / "**" / "*.parquet").as_posix())
@@ -84,7 +85,7 @@ def _last_close(data_dir: Path, symbol: str, asset_type: str) -> float | None:
             .select(pl.col("close").last())
             .collect()
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional valuation data is a soft dependency
         return None
     if df.is_empty() or df["close"][0] is None:
         return None
@@ -156,7 +157,7 @@ def overview(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
                 live = paper.overview(data_dir, snapshot, account_id=acc_id)
                 live["fees"] = ov["fees"]
                 return live
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - live estimate must fall back to daily valuation
             logger.warning("paper overview 实时估算失败, 降级日线口径: %s", e)
     return ov
 
@@ -351,7 +352,7 @@ def update_settings(request: Request, body: SettingsModel, account: str = Query(
 # ===== 自动跟单规则 (V2) =====
 class AutoRuleModel(BaseModel):
     name: str
-    match_kind: str                 # strategy / rule
+    match_kind: str                 # strategy / rule / wind
     match_id: str
     side: str = "buy"
     size_mode: str = "fixed_amount" # fixed_amount / pct_equity
@@ -362,6 +363,7 @@ class AutoRuleModel(BaseModel):
     enabled: bool = True
     stop_loss_pct: float | None = None  # 风控: 负小数 (如 -0.07); None=回落策略 STOP_LOSS
     max_hold_days: int | None = None    # 风控: 正整数; None=回落策略 MAX_HOLD_DAYS
+    exit_config: dict = {}               # HRAE 风向退出参数; 仅 match_kind=wind 使用
 
 
 @router.get("/auto_rules")
@@ -395,6 +397,27 @@ def delete_auto_rule(request: Request, rule_id: str, account: str = Query(paper.
     if not paper_auto.delete_auto_rule(_data_dir(request), rule_id, _acc(request, account)):
         raise HTTPException(status_code=404, detail=f"规则不存在: {rule_id}")
     return {"ok": True}
+
+
+@router.get("/risk")
+def risk_snapshot(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
+    """当前 HRAE-PBR 账户风险预算快照; 只读, 不产生订单。"""
+    from app.strategy import paper_auto
+    qs = getattr(request.app.state, "quote_service", None)
+    if qs is None:
+        return {"available": False, "reason": "实时行情服务不可用"}
+    try:
+        enriched, day = qs.get_enriched_today()
+        from app.market_time import cn_today
+        if enriched.is_empty() or day != cn_today():
+            return {"available": False, "reason": "当日标准化行情尚未就绪"}
+        snapshot = paper_auto.get_hrae_risk_snapshot(
+            _data_dir(request), enriched.to_dicts(), _acc(request, account),
+        )
+        return {"available": snapshot is not None, "snapshot": snapshot}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("paper risk snapshot failed: %s", e)
+        return {"available": False, "reason": "风险快照暂时不可用"}
 
 
 # ===== 对比批量创建 (V3): 同规格多账户并行对比的构造入口 =====
