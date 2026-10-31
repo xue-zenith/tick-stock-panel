@@ -274,6 +274,29 @@ HTTP/WebSocket 回调应在适配器边界完成厂商要求的签名校验后�
 
 连接顺序为：创建账户 → `POST /api/live/accounts/{id}/connect` → 拉取并落库资金/持仓/成交 → clean 对账 → 人工 Arm。审批通过后会再次执行最新风控并立即送达该账户的已连接适配器；撤单只有获得券商成功确认后才更新为 `CANCELLED`。
 
+#### Futu / IBKR Gateway 安装与只读联调
+
+主 FastAPI 环境默认不捆绑厂商 SDK。当前适配器采用可选依赖方式；安装脚本默认把 SDK 安装到 `backend/.venv`（也可通过 `FUTU_VENV_DIR` / `IBKR_VENV_DIR` 指向独立 Gateway venv）：
+
+```bash
+# Futu: 安装 futu-api + keyring，不安装 OpenD；OpenD 需单独启动并登录
+scripts/brokers/install-futu.sh
+
+# IBKR: 从 IBKR 官网下载与 TWS/IB Gateway 匹配的 TWS API 源码
+IBKR_API_SOURCE="/path/to/TWS API/source/pythonclient" scripts/brokers/install-ibkr.sh
+```
+
+然后在实盘页“券商 Gateway 接入与环境检测”保存 host/port、Paper/Simulate 环境和账户引用。Gateway Token 只写入系统 Keychain/Credential Manager；数据库只保存非敏感连接元数据。连接测试和账户发现均为只读，不会发送测试订单。
+
+命令行 Doctor 同样只做 SDK、TCP 和运行时检查：
+
+```bash
+python scripts/brokers/doctor.py --broker futu --config config/futu-paper.json --json
+python scripts/brokers/doctor.py --broker ibkr --config config/ibkr-paper.json --json
+```
+
+Paper/Simulate 和 REAL 环境严格区分；默认 `read_only=true`，未完成终端登录、账户发现、资金/持仓/委托/成交读取及对账前不会进入可交易状态。IBKR 官方 `ibapi` 必须从厂商下载源码安装；QMT/XtQuant 仅在 Windows + MiniQMT 环境中按同一契约加载。
+
 ### 部署注意事项
 
 - **数据隔离**：`data/live_trading/oms.db` 是实盘账本，包含意图/审批/风控/回报/审计，不与模拟盘数据混用

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -221,7 +222,9 @@ class ScreenerService:
                 )
                 .sort(["symbol", "date"])
             )
-            available = [c for c in read_cols if c in lf.schema]
+            # collect_schema() avoids resolving the complete LazyFrame schema through
+            # the deprecated/expensive `lf.schema` property on every cold-cache request.
+            available = [c for c in read_cols if c in lf.collect_schema().names()]
             df_hist = lf.select(available).collect()
         except Exception as e:  # noqa: BLE001
             logger.warning("warmup history load failed: %s", e)
@@ -417,10 +420,8 @@ class ScreenerService:
             df_result = pl.DataFrame()
         finally:
             if con is not None:
-                try:
+                with suppress(Exception):
                     con.close()
-                except Exception:  # noqa: BLE001
-                    pass
 
         rows = df_result.to_dicts() if not df_result.is_empty() else []
         elapsed = (time.perf_counter() - t0) * 1000

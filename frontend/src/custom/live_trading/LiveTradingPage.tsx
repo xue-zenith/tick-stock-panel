@@ -20,6 +20,7 @@ import { HealthPanel } from './HealthPanel'
 import { ArmDisarmButtons, ModeBadge } from './controls'
 import { CreateAccountModal } from './CreateAccountModal'
 import { useLiveTradingSSE } from './useLiveTradingSSE'
+import { GatewaySetupPanel } from './GatewaySetupPanel'
 
 /** 账户选择器 — 自定义下拉 (不依赖原生 <select>, 完全 CSS 接管, dark/light 通用)。 */
 function AccountSelector({
@@ -142,6 +143,7 @@ export function LiveTradingPage() {
     return (
       <div className="px-4 py-6 sm:px-6">
         <PageHeader title="实盘交易" subtitle="真实账户下单 · 人工逐笔审批 · 全链路审计" />
+        <GatewaySetupPanel />
         <div className="rounded-xl border border-danger/30 bg-danger/5 p-5 text-sm text-danger">账户列表加载失败：{String(accountsQ.error)}</div>
       </div>
     )
@@ -209,6 +211,8 @@ export function LiveTradingPage() {
           </div>
         }
       />
+
+      <GatewaySetupPanel />
 
       {/* LIVE 安全控制台：连接、账本、事件流三条链路明确分离。 */}
       {effAccount && (

@@ -69,6 +69,8 @@ _RULES: list[tuple[str, str, str]] = [
     ("GET", "/api/live/reconciliation", "live:read"),
     ("GET", "/api/live/scheduler", "live:read"),
     ("GET", "/api/live/autonomy", "live:read"),
+    ("GET", "/api/live/gateways", "live:read"),
+    ("GET", "/api/live/gateways/", "live:read"),
     # live:propose 提交交易意图 (不自动执行, 需审批)
     ("POST", "/api/live/orders", "live:propose"),
     # live:approve 审批通过/拒绝 + 撤单
@@ -76,6 +78,8 @@ _RULES: list[tuple[str, str, str]] = [
     ("DELETE", "/api/live/orders", "live:approve"),
     # live:admin 账户管理/启停/对账触发/调度器/授权
     ("POST", "/api/live/accounts", "live:admin"),
+    ("POST", "/api/live/gateways", "live:admin"),
+    ("POST", "/api/live/gateways/", "live:admin"),
     ("POST", "/api/live/arm", "live:admin"),
     ("POST", "/api/live/disarm", "live:admin"),
     ("POST", "/api/live/reconciliation/run", "live:admin"),

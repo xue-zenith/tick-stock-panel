@@ -17,6 +17,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.market_time import cn_today
 from app.trading import autonomy, broker_service, oms, store
+from app.trading.brokers.credentials import (
+    GatewayConfigStore,
+    SecretStoreUnavailableError,
+    put_secret,
+)
+from app.trading.brokers.runtime import report as runtime_report
 from app.trading.contracts import TradingMode
 
 logger = logging.getLogger(__name__)
@@ -134,7 +140,8 @@ class CreateAccountModel(BaseModel):
 
 class IntentModel(BaseModel):
     account_id: str
-    symbol: str = Field(pattern=r"^[0-9]{6}\.(SH|SZ|BJ)$")
+    # A 股沿用 600000.SH 格式；IBKR/Futu 允许 AAPL、0700.HK 等厂商代码。
+    symbol: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,31}$")
     side: Literal["buy", "sell"]
     qty: int = Field(gt=0)
     price_policy: Literal["limit", "market", "next_open", "close"] = "limit"
@@ -166,7 +173,125 @@ class CreateGrantModel(BaseModel):
     max_order_value: float = 0.0
 
 
+class GatewayConfigModel(BaseModel):
+    gateway_id: str = Field(min_length=2, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
+    broker: Literal["futu", "ibkr", "qmt"]
+    host: str = "127.0.0.1"
+    port: int = Field(gt=0, lt=65536)
+    environment: Literal["SIMULATE", "PAPER", "REAL"] = "PAPER"
+    account_id: str | None = Field(default=None, max_length=80)
+    client_id: int | None = Field(default=None, ge=0, le=32767)
+    market: str | None = None
+    userdata_path: str | None = None
+    read_only: bool = True
+    auth_token: str | None = Field(default=None, min_length=32, max_length=512)
+
+
+def _gateway_public(row: dict) -> dict:
+    return {k: v for k, v in row.items() if k not in {"auth_token", "auth_token_ref"}}
+
+
 def _register(router: APIRouter) -> None:
+
+    @router.get("/gateways")
+    def list_gateways(request: Request):
+        """Return non-secret gateway configs plus liveness/readiness metadata."""
+        rows = GatewayConfigStore(_data_dir(request)).load()
+        result = []
+        for gateway_id, row in rows.items():
+            check = runtime_report(
+                broker=str(row.get("broker")), gateway_id=gateway_id,
+                host=str(row.get("host") or "127.0.0.1"), port=int(row.get("port") or 0),
+                environment=str(row.get("environment") or "PAPER"),
+            )
+            result.append({**_gateway_public(row), "gateway_id": gateway_id, "readiness": check})
+        return {"gateways": result}
+
+    @router.post("/gateways")
+    def save_gateway(request: Request, body: GatewayConfigModel):
+        """Save only connection metadata; credentials go to the OS keyring."""
+        d = _data_dir(request)
+        store_obj = GatewayConfigStore(d)
+        row = body.model_dump(exclude_none=True)
+        token = row.pop("auth_token", None)
+        if token:
+            try:
+                row["auth_token_ref"] = put_secret(body.gateway_id, token)
+            except SecretStoreUnavailableError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+        saved = store_obj.upsert(body.gateway_id, row)
+        return {"gateway": _gateway_public({**saved, "gateway_id": body.gateway_id}), "secret_stored": bool(token)}
+
+    @router.get("/gateways/{gateway_id}/health")
+    def gateway_health(request: Request, gateway_id: str):
+        row = GatewayConfigStore(_data_dir(request)).get(gateway_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Gateway 配置不存在")
+        return runtime_report(
+            broker=str(row.get("broker")), gateway_id=gateway_id,
+            host=str(row.get("host") or "127.0.0.1"), port=int(row.get("port") or 0),
+            environment=str(row.get("environment") or "PAPER"),
+        )
+
+    @router.post("/gateways/{gateway_id}/test")
+    def test_gateway(request: Request, gateway_id: str):
+        """Read-only connection test; it never submits a test order."""
+        d = _data_dir(request)
+        row = GatewayConfigStore(d).get(gateway_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Gateway 配置不存在")
+        result = runtime_report(
+            broker=str(row.get("broker")), gateway_id=gateway_id,
+            host=str(row.get("host") or "127.0.0.1"), port=int(row.get("port") or 0),
+            environment=str(row.get("environment") or "PAPER"),
+        )
+        if result["read_capability"] != "READY":
+            return result
+        try:
+            if row["broker"] == "futu":
+                from app.trading.brokers.futu import FutuBrokerAdapter
+                adapter = FutuBrokerAdapter(str(row.get("account_id") or ""), row)
+            elif row["broker"] == "ibkr":
+                from app.trading.brokers.ibkr import IbkrBrokerAdapter
+                adapter = IbkrBrokerAdapter(str(row.get("account_id") or ""), row)
+            else:
+                from app.trading.brokers.xtquant import XtQuantBrokerAdapter
+                adapter = XtQuantBrokerAdapter(str(row.get("account_id") or ""), row)
+            connected = adapter.connect()
+            result["authenticated"] = bool(connected.get("connected"))
+            result["read_capability"] = "READY" if result["authenticated"] else "LOCKED"
+            result["trade_capability"] = "LOCKED"
+            result["checks"].append({"id": "account_discovery", "status": "PASS" if result["authenticated"] else "FAIL", "detail": connected.get("error") or "账户连接握手成功"})
+            adapter.disconnect()
+        except Exception as exc:  # noqa: BLE001 - doctor must return structured failure
+            result["read_capability"] = "LOCKED"
+            result["checks"].append({"id": "vendor_handshake", "status": "FAIL", "detail": str(exc), "action": "检查厂商终端登录、API 权限和账户环境"})
+        return result
+
+    @router.get("/gateways/{gateway_id}/accounts/discover")
+    def discover_gateway_accounts(request: Request, gateway_id: str):
+        """Discover accounts without storing credentials or placing an order."""
+        row = GatewayConfigStore(_data_dir(request)).get(gateway_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Gateway 配置不存在")
+        try:
+            if row["broker"] == "futu":
+                from app.trading.brokers.futu import FutuBrokerAdapter
+                adapter = FutuBrokerAdapter(str(row.get("account_id") or ""), row)
+            elif row["broker"] == "ibkr":
+                from app.trading.brokers.ibkr import IbkrBrokerAdapter
+                adapter = IbkrBrokerAdapter(str(row.get("account_id") or ""), row)
+            else:
+                from app.trading.brokers.xtquant import XtQuantBrokerAdapter
+                adapter = XtQuantBrokerAdapter(str(row.get("account_id") or ""), row)
+            connected = adapter.connect()
+            if not connected.get("connected"):
+                return {"gateway_id": gateway_id, "broker": row.get("broker"), "accounts": [], "status": "locked", "error": connected.get("error")}
+            accounts = adapter.discover_accounts()
+            adapter.disconnect()
+            return {"gateway_id": gateway_id, "broker": row.get("broker"), "accounts": accounts, "status": "ready"}
+        except Exception as exc:  # noqa: BLE001 - discovery returns an actionable report
+            return {"gateway_id": gateway_id, "broker": row.get("broker"), "accounts": [], "status": "locked", "error": str(exc)}
 
     @router.get("/brokers")
     def list_brokers():

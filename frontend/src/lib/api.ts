@@ -1142,6 +1142,33 @@ export interface LiveBrokerCatalogResponse {
   }
 }
 
+export interface LiveGateway {
+  gateway_id: string
+  broker: 'futu' | 'ibkr' | 'qmt' | string
+  host: string
+  port: number
+  environment: 'SIMULATE' | 'PAPER' | 'REAL' | string
+  account_id?: string
+  client_id?: number
+  market?: string
+  read_only?: boolean
+  readiness?: LiveGatewayReadiness
+}
+
+export interface LiveGatewayReadiness {
+  gateway_id: string
+  broker: string
+  process: string
+  vendor_runtime: string
+  authenticated: boolean
+  environment: string
+  accounts_discovered: number
+  account_verified: boolean
+  read_capability: string
+  trade_capability: string
+  checks: Array<{ id: string; status: string; detail?: string; action?: string }>
+}
+
 export interface LiveBrokerCapabilities {
   asset_types: string[]
   time_in_force: string[]
@@ -1418,7 +1445,7 @@ export interface PaperOrder {
 export interface PaperAutoRule {
   id: string
   name: string
-  match_kind: 'strategy' | 'rule'
+  match_kind: 'strategy' | 'rule' | 'wind'
   match_id: string
   /** auto = 跟随策略信号方向 (入场/进池买入, 出场/移出全平); 仅 match_kind=strategy 支持 */
   side: 'buy' | 'sell' | 'auto'
@@ -1430,6 +1457,7 @@ export interface PaperAutoRule {
   max_positions?: number
   enabled: boolean
   created_at: string
+  exit_config?: Record<string, number>
 }
 
 export interface PaperFill {
@@ -4291,6 +4319,9 @@ export const api = {
   paperAutoRuleDelete: (id: string, account?: string) =>
     request<{ ok: boolean }>(accUrl(`/api/paper/auto_rules/${encodeURIComponent(id)}`, account), { method: 'DELETE' }),
 
+  paperRiskSnapshot: (account?: string) =>
+    request<{ available: boolean; reason?: string; snapshot?: PaperRiskSnapshot | null }>(accUrl('/api/paper/risk', account)),
+
   /** 对比批量创建: 同本金/同费率一次开 N 个账户, 各绑一条自动跟单规则 */
   paperArenaCreate: (body: { initial_cash: number; sources: PaperArenaSource[]; name_prefix?: string; commission_pct?: number; stamp_tax_pct?: number; slippage_bps?: number }) =>
     request<{ created: Array<{ account: string; name: string; rule_id: string }> }>('/api/paper/arena/batch_create', {
@@ -4470,6 +4501,24 @@ export const api = {
   liveBrokers: () =>
     request<LiveBrokerCatalogResponse>('/api/live/brokers'),
 
+  liveGateways: () => request<{ gateways: LiveGateway[] }>('/api/live/gateways'),
+
+  liveSaveGateway: (body: {
+    gateway_id: string; broker: 'futu' | 'ibkr' | 'qmt'; host: string; port: number;
+    environment: 'SIMULATE' | 'PAPER' | 'REAL'; account_id?: string; client_id?: number;
+    market?: string; userdata_path?: string; read_only?: boolean; auth_token?: string;
+  }) => request<{ gateway: LiveGateway; secret_stored: boolean }>('/api/live/gateways', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
+
+  liveTestGateway: (gatewayId: string) => request<LiveGatewayReadiness>(
+    `/api/live/gateways/${encodeURIComponent(gatewayId)}/test`, { method: 'POST' },
+  ),
+
+  liveDiscoverGatewayAccounts: (gatewayId: string) => request<{ gateway_id: string; broker: string; accounts: Array<Record<string, string>>; status: string; error?: string }>(
+    `/api/live/gateways/${encodeURIComponent(gatewayId)}/accounts/discover`,
+  ),
+
   liveCreateAccount: (body: { account_id: string; broker?: string; display_name?: string }) =>
     request<{ account: LiveAccount }>('/api/live/accounts', {
       method: 'POST',
@@ -4571,6 +4620,28 @@ export const api = {
 
   liveDisarm: (account: string) =>
     request<{ account_id: string; mode: string }>(`/api/live/disarm?account=${encodeURIComponent(account)}`, { method: 'POST' }),
+}
+
+export interface PaperRiskSnapshot {
+  version: string
+  equity: number
+  initial_equity: number
+  cash: number
+  market_value: number
+  cumulative_pnl: number
+  high_water_mark: number
+  drawdown: number
+  drawdown_floor: number
+  profit_floor: number
+  capital_floor: number
+  risk_cushion: number
+  current_exposure: number
+  target_exposure: number
+  forecast_volatility: number
+  account_hrae_score: number
+  dominant_constraint: string
+  risk_state: 'NORMAL' | 'CAUTION' | 'REDUCE' | 'HALT'
+  updated_at: string
 }
 
 // ===== Pipeline =====

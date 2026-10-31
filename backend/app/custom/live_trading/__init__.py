@@ -29,6 +29,11 @@ def startup(context: ExtensionContext) -> None:
     from app.trading import store
     store.init_db(context.data_dir)
 
+    # 只注册当前环境真正安装的厂商 SDK；未安装时保留 catalog 接入位，
+    # 但不允许创建账户或下单。
+    from app.trading.brokers import registry as _broker_registry
+    _broker_registry.register_optional_vendor_adapters(context.data_dir)
+
     # 启动定时对账调度器 (后台 asyncio 任务, 周期性拉取 broker 状态对账)
     # 软失败: 调度器启动失败不阻止主程序 (镜像 financial_scheduler 启动模式)
     from app.trading import scheduler as _scheduler

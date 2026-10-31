@@ -22,7 +22,7 @@ from pathlib import Path
 import polars as pl
 
 from app.market_time import cn_today
-from app.parquet import scan_enriched_parquet
+from app.parquet import scan_parquet_compat
 from app.services.fs_utils import atomic_write_parquet
 from app.services.rps_rotation import _load_concept_map_df
 
@@ -64,7 +64,7 @@ def _resolve_filter_config(filter_cfg: dict | None) -> dict:
             "max_members": int(cfg["max_members"]),
             "blacklist": set(cfg["blacklist"]),
         }
-    except Exception:
+    except Exception:  # noqa: BLE001 - invalid optional preferences use safe defaults
         return {"min_members": 4, "max_members": 600, "blacklist": set()}
 
 
@@ -95,7 +95,7 @@ def load_risk_warning_symbols(data_dir: Path) -> frozenset[str]:
             df = pl.read_parquet(inst_dir / "**" / "*.parquet").select(["symbol", "name"])
             st = df.filter(polars_is_risk_warning_name(pl.col("name")))
             syms = frozenset(s.upper() for s in st["symbol"].to_list())
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - snapshot read failure yields an empty exclusion set
             logger.warning("load risk-warning symbols failed: %s", e)
     _ST_SYMBOLS_CACHE = (now, syms)
     return syms
@@ -108,7 +108,7 @@ def load_mainline_history(data_dir: Path, kind: str = "concept") -> pl.DataFrame
         return pl.DataFrame()
     try:
         df = pl.read_parquet(p)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - missing/corrupt cache is handled as empty history
         logger.warning("load_mainline_history failed: %s", e)
         return pl.DataFrame()
     if df.is_empty() or "kind" not in df.columns:
@@ -163,8 +163,18 @@ def compute_mainline_range(repo, data_dir: Path, start: date, end: date,
             return pl.DataFrame()
 
     limit_rows = (
-        scan_enriched_parquet(enriched_dir / "**" / "*.parquet")
-        .select(["date", "symbol", "consecutive_limit_ups", "amount"])
+        scan_parquet_compat(
+            enriched_dir / "**" / "*.parquet",
+            cast_options=pl.ScanCastOptions(integer_cast="upcast"),
+        )
+        # Historical partitions may contain UInt32 while newer/custom partitions
+        # contain Int64. Cast at the scan boundary so a mixed Hive dataset cannot
+        # fail the entire mainline calculation during lazy collection.
+        .select([
+            "date", "symbol",
+            pl.col("consecutive_limit_ups").cast(pl.Int64, strict=False).alias("consecutive_limit_ups"),
+            pl.col("amount").cast(pl.Float64, strict=False).alias("amount"),
+        ])
         .filter(
             (pl.col("date") >= start) & (pl.col("date") <= end)
             & (pl.col("consecutive_limit_ups") >= 1)
@@ -181,7 +191,7 @@ def compute_mainline_range(repo, data_dir: Path, start: date, end: date,
         try:
             from app.services import preferences
             exclude_st = preferences.get_sentiment_exclude_st()
-        except Exception:
+        except Exception:  # noqa: BLE001 - optional preference failure keeps the conservative default
             exclude_st = True
     if exclude_st:
         st_syms = load_risk_warning_symbols(repo.store.data_dir)

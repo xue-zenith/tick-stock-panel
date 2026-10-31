@@ -121,11 +121,13 @@ export const QK = {
   paperRounds:          (acc: string) => ['paper', 'rounds', acc] as const,
   paperCompare:         ['paper', 'compare'] as const,
   paperAutoRules:       (acc: string) => ['paper', 'auto-rules', acc] as const,
+  paperRisk:            (acc: string) => ['paper', 'risk', acc] as const,
   alerts:               (source?: string) => ['alerts', source ?? ''] as const,
 
   // 实盘交易 (与模拟盘隔离; liveAll 作账户无关失效前缀)
   liveAll:              ['live'] as const,
   liveBrokers:          ['live', 'brokers'] as const,
+  liveGateways:         ['live', 'gateways'] as const,
   liveAccounts:         ['live', 'accounts'] as const,
   liveAccountDetail:    (acc?: string) => ['live', 'detail', acc ?? ''] as const,
   liveOrders:           (acc?: string) => ['live', 'orders', acc ?? ''] as const,
