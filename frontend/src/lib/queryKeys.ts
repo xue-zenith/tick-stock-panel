@@ -122,6 +122,7 @@ export const QK = {
   paperCompare:         ['paper', 'compare'] as const,
   paperAutoRules:       (acc: string) => ['paper', 'auto-rules', acc] as const,
   paperRisk:            (acc: string) => ['paper', 'risk', acc] as const,
+  paperRiskProposal:    (acc: string) => ['paper', 'risk-proposal', acc] as const,
   alerts:               (source?: string) => ['alerts', source ?? ''] as const,
 
   // 实盘交易 (与模拟盘隔离; liveAll 作账户无关失效前缀)

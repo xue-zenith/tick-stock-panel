@@ -1171,6 +1171,22 @@ async def _sync_data(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     }
 
 
+def _propose_hrae_config(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    """Agent 只读 HRAE-PBR 诊断; 不进入动作确认闸门, 因为没有写副作用。"""
+    if ctx.data_dir is None or ctx.quote_service is None:
+        raise ValueError("模拟盘数据或实时行情服务未就绪。")
+    from app.strategy import paper, paper_auto
+
+    account = paper.validate_account_id(str(args.get("account") or paper.DEFAULT_ACCOUNT_ID))
+    enriched, day = ctx.quote_service.get_enriched_today()
+    if enriched.is_empty() or day != cn_today():
+        raise ValueError("当日标准化行情尚未就绪，无法生成可靠的 HRAE 预览。")
+    preview = paper_auto.get_hrae_risk_preview(ctx.data_dir, enriched.to_dicts(), account)
+    if preview is None:
+        raise ValueError("模拟账户不存在、无持仓风险数据或行情字段不足。")
+    return preview
+
+
 _LOCAL_TOOLS: dict[str, Callable[[dict[str, Any], ToolContext], Any]] = {
     "get_stock_quote": _get_stock_quote,
     "get_stock_daily": _get_stock_daily,
@@ -1193,6 +1209,7 @@ _LOCAL_TOOLS: dict[str, Callable[[dict[str, Any], ToolContext], Any]] = {
     "query_ext_table": _query_ext_table,
     "get_sync_status": _get_sync_status,
     "sync_data": _sync_data,
+    "propose_hrae_config": _propose_hrae_config,
 }
 
 
@@ -1224,6 +1241,12 @@ def _local_tool_schemas() -> list[dict[str, Any]]:
                 },
             },
             ["symbols"],
+        ),
+        _schema(
+            "propose_hrae_config",
+            "只读检查模拟盘账户的 HRAE-PBR 风险状态，生成配置建议与持仓减仓模拟预览；绝不写入配置、创建规则或下单。",
+            {"account": {"type": "string", "description": "模拟账户 ID，默认 default"}},
+            [],
         ),
         _schema(
             "get_stock_daily",
@@ -1477,6 +1500,10 @@ def summarize_tool_result(name: str, payload: dict[str, Any]) -> str:
         ))
     if name == "get_stock_quote":
         return f"查询 {_count()} 只个股实时行情"
+    if name == "propose_hrae_config":
+        preview = result.get("preview") if isinstance(result.get("preview"), dict) else result
+        snapshot = preview.get("snapshot") if isinstance(preview, dict) else {}
+        return f"HRAE-PBR 预览: {snapshot.get('risk_state', '-')} · 建议 {preview.get('proposal', {}).get('recommended_action', '-')}"
     if name == "get_stock_daily":
         return f"返回 {_count()} 个交易日日线"
     if name == "get_stock_analysis":

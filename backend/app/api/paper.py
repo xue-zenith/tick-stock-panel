@@ -32,6 +32,28 @@ def _acc(request: Request, account: str) -> str:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+def _paper_enriched_today(request: Request):
+    """读取模拟盘风控所需行情；缓存冷却时按用户显式诊断请求做一次同步恢复。"""
+    qs = getattr(request.app.state, "quote_service", None)
+    if qs is None:
+        return None, None
+    enriched, day = qs.get_enriched_today()
+    if not enriched.is_empty():
+        return enriched, day
+    # QuoteService 的普通行情热路径故意 fail-closed，不在请求中重算。
+    # 风控诊断是用户主动点击的低频只读请求，可以在预热失败后恢复内存缓存。
+    repo = getattr(request.app.state, "repo", None)
+    refresh = getattr(repo, "_refresh_enriched", None)
+    warming = bool(getattr(repo, "_enriched_warming", False))
+    if callable(refresh) and not warming:
+        try:
+            refresh()
+            enriched, day = qs.get_enriched_today()
+        except Exception:  # noqa: BLE001 - 诊断恢复失败必须保持只读降级
+            return enriched, day
+    return enriched, day
+
+
 class AccountModel(BaseModel):
     initial_cash: float
     account_id: str = paper.DEFAULT_ACCOUNT_ID
@@ -407,7 +429,7 @@ def risk_snapshot(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_I
     if qs is None:
         return {"available": False, "reason": "实时行情服务不可用"}
     try:
-        enriched, day = qs.get_enriched_today()
+        enriched, day = _paper_enriched_today(request)
         from app.market_time import cn_today
         if enriched.is_empty() or day != cn_today():
             return {"available": False, "reason": "当日标准化行情尚未就绪"}
@@ -418,6 +440,28 @@ def risk_snapshot(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_I
     except Exception as e:  # noqa: BLE001
         logger.warning("paper risk snapshot failed: %s", e)
         return {"available": False, "reason": "风险快照暂时不可用"}
+
+
+@router.get("/risk/proposal")
+def risk_proposal(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
+    """HRAE-PBR Agent 只读诊断与模拟配置建议; 不写规则、不下单。"""
+    from app.strategy import paper_auto
+
+    qs = getattr(request.app.state, "quote_service", None)
+    if qs is None:
+        return {"available": False, "reason": "实时行情服务不可用"}
+    try:
+        enriched, day = _paper_enriched_today(request)
+        from app.market_time import cn_today
+        if enriched.is_empty() or day != cn_today():
+            return {"available": False, "reason": "当日标准化行情尚未就绪"}
+        preview = paper_auto.get_hrae_risk_preview(
+            _data_dir(request), enriched.to_dicts(), _acc(request, account),
+        )
+        return {"available": preview is not None, "preview": preview}
+    except Exception as e:  # noqa: BLE001 - preview endpoint fails closed
+        logger.warning("paper HRAE Agent proposal failed: %s", e)
+        return {"available": False, "reason": "Agent 风险预览暂时不可用"}
 
 
 # ===== 对比批量创建 (V3): 同规格多账户并行对比的构造入口 =====

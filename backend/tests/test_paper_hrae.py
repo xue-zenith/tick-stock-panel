@@ -88,3 +88,22 @@ def test_hrae_pbr_uses_equity_and_market_value_to_cap_concentration(tmp_path, mo
     assert len(orders) == 1
     assert orders[0]["side"] == "sell"
     assert orders[0]["qty"] > 0
+
+
+def test_hrae_agent_preview_is_read_only_and_generates_proposal(tmp_path, monkeypatch):
+    _ready_account(tmp_path, monkeypatch)
+    before = sorted(p.name for p in (tmp_path / "accounts" / "default").rglob("*") if p.is_file())
+    preview = paper_auto.get_hrae_risk_preview(tmp_path, [{
+        "symbol": SYM, "raw_close": 10.0, "close": 10.0, "change_pct": 0.01,
+        "ema20": 9.5, "ema60": 9.0, "momentum_5d": 0.02,
+        "momentum_20d": 0.04, "atr_14": 0.2,
+    }])
+    assert preview is not None
+    assert preview["rule_configured"] is False
+    assert preview["proposal"]["safety"] == {
+        "mode": "preview", "writes_config": False,
+        "creates_orders": False, "requires_user_confirmation": True,
+    }
+    assert preview["snapshot"]["equity"] > 0
+    after = sorted(p.name for p in (tmp_path / "accounts" / "default").rglob("*") if p.is_file())
+    assert after == before

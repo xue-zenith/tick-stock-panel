@@ -18,7 +18,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { echarts } from '@/lib/echarts'
 import { Banknote, ChevronDown, ChevronUp, CircleDollarSign, GitCompare, History, ListChecks, PieChart, Plus, RefreshCw, Settings, ShieldAlert, SlidersHorizontal, Snowflake, Trash2, TrendingUp, Wallet, X, Zap } from 'lucide-react'
 import { createPortal } from 'react-dom'
-import { api, type PaperCompareRow, type PaperFill, type PaperHolding, type PaperOrder, type PaperRound } from '@/lib/api'
+import { api, type PaperCompareRow, type PaperFill, type PaperHolding, type PaperOrder, type PaperRound, type PaperRiskPreview } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useQuoteStatus } from '@/lib/useSharedQueries'
 import { cn } from '@/lib/cn'
@@ -1171,6 +1171,12 @@ function AutoRulesPanel({ acc }: { acc: string }) {
   const qc = useQueryClient()
   const rulesQ = useQuery({ queryKey: QK.paperAutoRules(acc), queryFn: () => api.paperAutoRules(acc) })
   const riskQ = useQuery({ queryKey: QK.paperRisk(acc), queryFn: () => api.paperRiskSnapshot(acc), refetchInterval: 15_000 })
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const previewQ = useQuery({
+    queryKey: QK.paperRiskProposal(acc),
+    queryFn: () => api.paperRiskProposal(acc),
+    enabled: previewOpen,
+  })
   const rules = rulesQ.data?.rules ?? []
   const [creating, setCreating] = useState(false)
 
@@ -1208,38 +1214,104 @@ function AutoRulesPanel({ acc }: { acc: string }) {
           <div><span className="text-muted">主约束</span><div className="font-mono">{riskQ.data.snapshot.dominant_constraint}</div></div>
         </div>
       )}
+      <div className="mt-3 flex items-center justify-between rounded-btn border border-accent/20 bg-accent/5 px-3 py-2">
+        <div>
+          <div className="text-xs font-medium text-accent">HRAE-PBR Agent 风险诊断</div>
+          <div className="mt-0.5 text-[11px] text-muted">自动识别风险、生成参数建议并模拟减仓；仅预览，不写配置、不下单</div>
+        </div>
+        <button onClick={() => setPreviewOpen(v => !v)} className="shrink-0 rounded-btn bg-accent px-2.5 py-1 text-xs text-white transition-colors hover:bg-accent/90">
+          {previewOpen ? '收起预览' : '生成预览'}
+        </button>
+      </div>
+      {previewOpen && <HraePreviewCard
+        data={previewQ.data?.preview}
+        loading={previewQ.isLoading}
+        error={previewQ.data?.reason || (previewQ.error instanceof Error ? previewQ.error.message : undefined)}
+      />}
       {rules.length === 0 ? (
         <div className="py-8 text-center text-xs text-muted">暂无规则 — 新建一条, 让策略信号自动进入模拟盘</div>
       ) : (
-        <div className="mt-2 space-y-1">
+        <div className="mt-3 space-y-2">
           {rules.map(r => (
-            <div key={r.id} className="flex items-center gap-2 rounded-btn px-2 py-1.5 text-xs transition-colors hover:bg-elevated/40">
-              <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', r.enabled ? 'bg-bear' : 'bg-muted')} />
-              <span className="w-28 shrink-0 truncate font-medium">{r.name}</span>
-              <span className="w-20 shrink-0 text-muted">{r.match_kind === 'strategy' ? '跟策略' : r.match_kind === 'wind' ? '风向退出' : '跟规则'}</span>
-              <span className="w-32 shrink-0 truncate font-mono text-[11px] text-muted" title={r.match_id}>{r.match_id}</span>
-              <span className={cn('w-8 shrink-0 font-medium', r.side === 'buy' ? 'text-bull' : r.side === 'sell' ? 'text-bear' : 'text-accent')} title={r.side === 'auto' ? '自动: 入场信号买入 · 出场信号全平' : undefined}>{r.side === 'auto' ? '自动' : r.side === 'buy' ? '买' : '卖'}</span>
-              <span className="w-24 shrink-0 font-mono text-[11px] text-muted">
-                {r.size_mode === 'fixed_amount' ? fmtMoney(r.size_value, 0) : `${r.size_value}% 权益`}
-              </span>
-              <span className="w-16 shrink-0 text-[11px] text-muted">{ORDER_TYPE_LABEL[r.order_type]} · 冷却{r.cooldown_days}天</span>
-              {r.max_positions != null && r.max_positions > 0 && (
-                <span className="shrink-0 text-[11px] text-muted" title="最大同时持仓标的数 (0 = 不限)">≤{r.max_positions}仓</span>
-              )}
-              <button
-                onClick={() => toggleM.mutate({ id: r.id, enabled: !r.enabled })}
-                className={cn('ml-auto shrink-0 rounded-btn px-2 py-0.5 text-[10px] transition-colors',
-                  r.enabled ? 'bg-bear/10 text-bear hover:bg-bear/20' : 'bg-elevated text-muted hover:text-secondary')}
-              >
-                {r.enabled ? '停用' : '启用'}
-              </button>
-              <button onClick={() => deleteM.mutate(r.id)} className="shrink-0 rounded p-0.5 text-muted hover:text-danger" title="删除规则">
-                <X className="h-3.5 w-3.5" />
-              </button>
+            <div key={r.id} className="rounded-btn border border-border bg-base p-3 transition-colors hover:border-accent/35 hover:bg-elevated/25">
+              <div className="flex min-w-0 items-start gap-2">
+                <span className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', r.enabled ? 'bg-bull shadow-[0_0_0_3px_rgba(34,197,94,0.12)]' : 'bg-muted')} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <span className="truncate text-sm font-semibold text-primary" title={r.name}>{r.name}</span>
+                    <span className={cn('rounded-full px-1.5 py-0.5 text-[10px]', r.enabled ? 'bg-bull/10 text-bull' : 'bg-elevated text-muted')}>
+                      {r.enabled ? '运行中' : '已停用'}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 truncate font-mono text-[10px] text-muted" title={r.id}>{r.id}</div>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    onClick={() => toggleM.mutate({ id: r.id, enabled: !r.enabled })}
+                    className={cn('rounded-btn px-2.5 py-1 text-[11px] transition-colors',
+                      r.enabled ? 'bg-bear/10 text-bear hover:bg-bear/20' : 'bg-accent/10 text-accent hover:bg-accent/20')}
+                  >
+                    {r.enabled ? '停用' : '启用'}
+                  </button>
+                  <button onClick={() => deleteM.mutate(r.id)} className="rounded-btn p-1.5 text-muted transition-colors hover:bg-danger/10 hover:text-danger" title="删除规则" aria-label={`删除规则 ${r.name}`}>
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2 border-t border-border/70 pt-2.5 md:grid-cols-4">
+                <div className="min-w-0">
+                  <div className="text-[10px] text-muted">跟随来源</div>
+                  <div className="mt-1 truncate text-xs text-secondary" title={r.match_id}>
+                    {r.match_kind === 'strategy' ? '策略信号' : r.match_kind === 'wind' ? 'HRAE 风向' : '监控规则'}
+                  </div>
+                  <div className="mt-0.5 truncate font-mono text-[10px] text-muted" title={r.match_id}>{r.match_id}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted">交易方向</div>
+                  <span className={cn('mt-1 inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium',
+                    r.side === 'buy' ? 'bg-bull/10 text-bull' : r.side === 'sell' ? 'bg-bear/10 text-bear' : 'bg-accent/10 text-accent')}
+                    title={r.side === 'auto' ? '自动: 入场信号买入 · 出场信号全平' : undefined}
+                  >
+                    {r.side === 'auto' ? '自动买卖' : r.side === 'buy' ? '仅买入' : '仅卖出'}
+                  </span>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted">仓位规模</div>
+                  <div className="mt-1 font-mono text-xs text-secondary">
+                    {r.size_mode === 'fixed_amount' ? fmtMoney(r.size_value, 0) : `${r.size_value}% 权益`}
+                  </div>
+                  <div className="mt-0.5 text-[10px] text-muted">{r.max_positions != null && r.max_positions > 0 ? `最多 ${r.max_positions} 仓` : '不限制持仓数'}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted">执行条件</div>
+                  <div className="mt-1 text-xs text-secondary">{ORDER_TYPE_LABEL[r.order_type]}</div>
+                  <div className="mt-0.5 text-[10px] text-muted">冷却 {r.cooldown_days} 天</div>
+                </div>
+              </div>
             </div>
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function HraePreviewCard({ data, loading, error }: { data?: PaperRiskPreview | null; loading: boolean; error?: string }) {
+  if (loading) return <div className="mt-2 rounded-btn border border-border bg-base px-3 py-3 text-xs text-muted">正在读取行情与账户风险…</div>
+  if (!data) return <div className="mt-2 rounded-btn border border-border bg-base px-3 py-3 text-xs text-muted">{error || '暂无可用预览，请确认账户与当日标准化行情已就绪。'}</div>
+  const changes = data.proposal.changes
+  const reductions = Object.values(data.plan).filter(item => item.reduction_ratio > 0)
+  return (
+    <div className="mt-2 rounded-btn border border-border bg-base px-3 py-3 text-xs">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span>建议动作 <b className="text-accent">{data.proposal.recommended_action}</b></span>
+        <span>风险状态 <b>{data.snapshot.risk_state}</b></span>
+        <span>当前/目标暴露 <b className="font-mono">{(data.snapshot.current_exposure * 100).toFixed(1)}% / {(data.snapshot.target_exposure * 100).toFixed(1)}%</b></span>
+        <span>模拟减仓 {reductions.length} 个持仓</span>
+      </div>
+      <div className="mt-2 leading-relaxed text-muted">{data.proposal.rationale}</div>
+      {changes.length > 0 && <div className="mt-2 rounded border border-accent/20 bg-accent/5 px-2 py-1.5">建议最大组合暴露：{(changes[0].current * 100).toFixed(1)}% → {(changes[0].suggested * 100).toFixed(1)}%</div>}
+      <div className="mt-2 text-[10px] text-muted">{data.rule_configured ? '已读取当前 HRAE 风向规则' : '当前尚未配置 HRAE 风向规则，使用审计基线进行模拟'} · Agent 不具备写配置和下单权限</div>
     </div>
   )
 }

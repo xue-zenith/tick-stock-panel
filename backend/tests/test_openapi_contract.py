@@ -92,6 +92,7 @@ EXPECTED_OPEN_ENDPOINTS: set[str] = {
     "GET /api/paper/overview",
     "GET /api/paper/positions",
     "GET /api/paper/risk",
+    "GET /api/paper/risk/proposal",
     "POST /api/paper/rebuild",
     "GET /api/paper/rounds",
     "POST /api/paper/settings",

@@ -4322,6 +4322,9 @@ export const api = {
   paperRiskSnapshot: (account?: string) =>
     request<{ available: boolean; reason?: string; snapshot?: PaperRiskSnapshot | null }>(accUrl('/api/paper/risk', account)),
 
+  paperRiskProposal: (account?: string) =>
+    request<{ available: boolean; reason?: string; preview?: PaperRiskPreview | null }>(accUrl('/api/paper/risk/proposal', account)),
+
   /** 对比批量创建: 同本金/同费率一次开 N 个账户, 各绑一条自动跟单规则 */
   paperArenaCreate: (body: { initial_cash: number; sources: PaperArenaSource[]; name_prefix?: string; commission_pct?: number; stamp_tax_pct?: number; slippage_bps?: number }) =>
     request<{ created: Array<{ account: string; name: string; rule_id: string }> }>('/api/paper/arena/batch_create', {
@@ -4642,6 +4645,23 @@ export interface PaperRiskSnapshot {
   dominant_constraint: string
   risk_state: 'NORMAL' | 'CAUTION' | 'REDUCE' | 'HALT'
   updated_at: string
+}
+
+export interface PaperRiskPreview {
+  account_id: string
+  rule_configured: boolean
+  rule_id: string | null
+  market_score: number
+  snapshot: PaperRiskSnapshot
+  plan: Record<string, { target_value: number; reduction_ratio: number; score: number; multiplier: number }>
+  proposal: {
+    recommended_action: 'HOLD' | 'CAUTION' | 'REDUCE' | 'HALT'
+    rationale: string
+    current_config: Record<string, number>
+    suggested_config: Record<string, number>
+    changes: Array<{ field: string; label: string; current: number; suggested: number; reason: string }>
+    safety: { mode: 'preview'; writes_config: false; creates_orders: false; requires_user_confirmation: true }
+  }
 }
 
 // ===== Pipeline =====

@@ -29,6 +29,24 @@ from app.strategy import paper
 logger = logging.getLogger(__name__)
 
 
+# HRAE-PBR 首轮可审计基线。Agent 预览只会读取/建议这些参数，绝不会直接写入规则。
+HRAE_DEFAULT_CONFIG = {
+    "base_max_exposure": 0.85,
+    "target_annual_volatility": 0.10,
+    "drawdown_warning": 0.04,
+    "drawdown_limit": 0.12,
+    "profit_lock_rate": 0.50,
+    "single_position_cap": 0.10,
+    "observe_threshold": -0.30,
+    "reduce_threshold": -0.50,
+    "exit_threshold": -0.70,
+    "consecutive_samples": 3,
+    "max_loss_pct": 0.08,
+    "atr_stop_atr": 2.5,
+    "rebalance_threshold": 0.05,
+}
+
+
 def _dir(data_dir: Path, account_id: str) -> Path:
     d = paper._root(data_dir, account_id) / "auto_rules"
     d.mkdir(parents=True, exist_ok=True)
@@ -489,6 +507,60 @@ def _portfolio_risk_snapshot(
     return snapshot, plan
 
 
+def _effective_hrae_config(rule: dict | None) -> dict:
+    """将规则配置与可审计基线合并；不修改传入规则。"""
+    config = dict(HRAE_DEFAULT_CONFIG)
+    if rule:
+        value = rule.get("exit_config")
+        if isinstance(value, dict):
+            config.update(value)
+    return config
+
+
+def _hrae_config_proposal(snapshot: dict, config: dict) -> dict:
+    """从当前快照生成保守的配置建议；这是纯函数，不执行任何副作用。"""
+    state = str(snapshot.get("risk_state") or "NORMAL")
+    current = float(config.get("base_max_exposure", HRAE_DEFAULT_CONFIG["base_max_exposure"]))
+    target = float(snapshot.get("target_exposure") or 0.0)
+    if state == "NORMAL":
+        action = "HOLD"
+        suggested = current
+        rationale = "当前组合未触发资本、波动率、回撤或 HRAE 约束，保持现有基线。"
+    elif state == "CAUTION":
+        action = "CAUTION"
+        suggested = min(current, max(target, 0.25))
+        rationale = f"当前由 {snapshot.get('dominant_constraint', '风险约束')} 主导，建议把最大暴露上限收敛到目标暴露附近。"
+    elif state == "REDUCE":
+        action = "REDUCE"
+        suggested = min(current, target)
+        rationale = "当前实际暴露高于 HRAE-PBR 目标暴露，建议先减仓，再评估是否调整参数。"
+    else:
+        action = "HALT"
+        suggested = 0.0
+        rationale = "已触及资本底线或最大回撤，建议停止新增风险并优先退出超额暴露。"
+    suggested = round(max(0.0, min(1.0, suggested)), 6)
+    changes = [] if abs(suggested - current) < 1e-9 else [{
+        "field": "base_max_exposure",
+        "label": "最大组合暴露",
+        "current": round(current, 6),
+        "suggested": suggested,
+        "reason": rationale,
+    }]
+    return {
+        "recommended_action": action,
+        "rationale": rationale,
+        "current_config": dict(config),
+        "suggested_config": {**config, "base_max_exposure": suggested},
+        "changes": changes,
+        "safety": {
+            "mode": "preview",
+            "writes_config": False,
+            "creates_orders": False,
+            "requires_user_confirmation": True,
+        },
+    }
+
+
 def _hrae_order(data_dir: Path, account_id: str, rule: dict, symbol: str, price: float, reason: str, ratio: float) -> dict | None:
     capacity = paper.sell_capacity(data_dir, symbol, account_id)
     if capacity is None:
@@ -606,6 +678,40 @@ def get_hrae_risk_snapshot(
     )
     _save_hrae_state(data_dir, account_id, rules[0]["id"], state)
     return snapshot
+
+
+def get_hrae_risk_preview(
+    data_dir: Path,
+    rows: list[dict],
+    account_id: str = paper.DEFAULT_ACCOUNT_ID,
+) -> dict | None:
+    """生成 HRAE-PBR Agent 诊断、参数建议和持仓模拟计划。
+
+    此函数刻意不保存 HRAE 状态、不创建规则、不创建订单，供 Agent/API/前端共用。
+    """
+    account = paper.get_account(data_dir, account_id)
+    if account is None or not rows:
+        return None
+    market = _market_score(rows)
+    if market is None:
+        return None
+    rules = [r for r in load_auto_rules(data_dir, account_id, enabled_only=True) if r.get("match_kind") == "wind"]
+    rule = rules[0] if rules else None
+    config = _effective_hrae_config(rule)
+    state = _load_hrae_state(data_dir, account_id, rule["id"]) if rule else {}
+    snapshot, plan = _portfolio_risk_snapshot(
+        account, paper.load_positions(data_dir, account_id), rows,
+        dict(state), config, market,
+    )
+    return {
+        "account_id": account_id,
+        "rule_configured": rule is not None,
+        "rule_id": rule.get("id") if rule else None,
+        "market_score": round(market, 6),
+        "snapshot": snapshot,
+        "plan": plan,
+        "proposal": _hrae_config_proposal(snapshot, config),
+    }
 
 
 _ORDER_TYPE_LABEL = {"market": "即时", "next_open": "次日开盘", "close": "当日收盘"}
