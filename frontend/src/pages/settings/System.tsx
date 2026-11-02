@@ -37,7 +37,7 @@ export function SettingsSystemPanel() {
   }, [])
 
   const [toastEnabled, setToastEnabled] = useState(() => {
-    try { return localStorage.getItem('alert_toast_enabled') !== '0' } catch { return true }
+    try { return localStorage.getItem('alert_toast_enabled') === '1' } catch { return false }
   })
   const [toastMax, setToastMax] = useState(() => {
     try {

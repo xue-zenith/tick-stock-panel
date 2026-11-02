@@ -27,10 +27,8 @@ const _listeners: Set<(items: Item[]) => void> = new Set()
 
 /** 从 localStorage 读取配置 */
 function getEnabled(): boolean {
-  try {
-    const v = localStorage.getItem('alert_toast_enabled')
-    return v === null ? true : v === '1'   // 默认开启
-  } catch { return true }
+  // 硬编码禁用: 弹窗已完全关闭, 不受 localStorage 开关影响
+  return false
 }
 
 function getMaxVisible(): number {

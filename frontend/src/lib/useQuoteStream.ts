@@ -88,8 +88,14 @@ export function useQuoteStream(
     const strategyAlerts = alerts.filter(a => a.source !== 'depth')
 
     // depth 通知直接 toast(防刷屏: 后端已在状态切换时才推)
-    for (const a of depthAlerts.slice(0, 1)) {
-      toast(a.message, 'success')
+    // 受 alert_toast_enabled 开关控制 (与监控告警弹窗同开关)
+    const _toastEnabled = (() => {
+      try { return localStorage.getItem('alert_toast_enabled') === '1' } catch { return false }
+    })()
+    if (_toastEnabled) {
+      for (const a of depthAlerts.slice(0, 1)) {
+        toast(a.message, 'success')
+      }
     }
 
     // 监控告警: 用专用 AlertToast (整批只响一声, 每条都弹, 受 maxVisible 上限保护)
