@@ -422,12 +422,12 @@ class QuoteService:
         """
         from app.services import preferences
         if not self.is_realtime_allowed():
-            if preferences.get_realtime_quotes_enabled():
-                self._save_enabled(False)
-            # 带生效源: 便于判断「该切哪个源」, 而不是只看到 TickFlow 档位
+            # 能力探测可能因网络抖动暂时失败 (如扶摇跨夜后短暂不可达)。
+            # 不再强制把 preferences 改为 False — 仅本次跳过启动线程,
+            # 下次进程重启时能力恢复即可自动启动, 避免开关被反复关闭。
             from app.data_providers.capabilities import capability_gate
             _, label = capability_gate("realtime")
-            logger.info("实时行情未启动: %s 不可用", label)
+            logger.info("实时行情未启动: %s 不可用 (preferences 保持不变, 下次重启自动重试)", label)
             return
         if preferences.get_realtime_quotes_enabled():
             self.start()
