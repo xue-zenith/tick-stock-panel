@@ -29,7 +29,8 @@ import pyarrow.dataset as pads
 from app.backtest.minute_trigger import build_minute_exit_reference
 from app.backtest.numba_runtime import run_numba_parallel
 from app.price_limits import (
-    MAIN_BOARD_ST_LIMIT_CHANGE_DATE,
+    numpy_gem_pre_registration_vector,
+    numpy_limit_pct_for_date,
     numpy_limit_pct_vectors,
     numpy_limit_price,
     write_numpy_price_limit_matrix,
@@ -51,7 +52,8 @@ except ImportError:
     prange = range
 
 _MATRIX_CACHE_VERSION = 1
-_DIRECT_MATRIX_LOADER_VERSION = 4
+# Price-limit rules are baked into the mmap fields and lock arrays.
+_DIRECT_MATRIX_LOADER_VERSION = 5
 _MATRIX_AXIS_INDEX_VERSION = 1
 _ARROW_BATCH_SIZE = 131_072
 _SCORE_ASSET_CHUNK_SIZE = 256
@@ -2198,15 +2200,14 @@ def _limit_lock_matrices(
     up_locked.fill(0)
     down_locked.fill(0)
     legacy_pct, current_pct = numpy_limit_pct_vectors(symbols, names)
+    pre_gem_pct = numpy_gem_pre_registration_vector(symbols, legacy_pct, names)
 
     previous_close = np.full(shape[1], np.nan, dtype=np.float64)
     previous_raw = np.full(shape[1], np.nan, dtype=np.float64)
     previous_adjustment = np.full(shape[1], np.nan, dtype=np.float64)
     for time_id in range(shape[0]):
-        limit_pct = (
-            legacy_pct
-            if trading_dates[time_id] < MAIN_BOARD_ST_LIMIT_CHANGE_DATE
-            else current_pct
+        limit_pct = numpy_limit_pct_for_date(
+            trading_dates[time_id], pre_gem_pct, legacy_pct, current_pct,
         )
         present = seen[time_id]
         current_close = close[time_id].astype(np.float64, copy=False)
@@ -2223,7 +2224,17 @@ def _limit_lock_matrices(
             & np.isfinite(previous_adjustment)
             & (np.abs(current_adjustment - previous_adjustment) > 1e-6)
         )
-        reference = np.where(adjustment_changed, previous_close, previous_raw)
+        # 除权日交易所参考价 = 前复权昨收还原到当日口径 (prev_qfq / 当日复权比例)。
+        # prev_qfq = raw_prev / F(prev) × F(today) ⇒ 商 = raw_prev × F(today)/F(prev)
+        # = raw_prev / ex_factor, 即除权参考价。直接拿 prev_qfq 当参考价会把限价
+        # 压低 F(prev)/F(today) 倍 — 窗口后还有更晚除权事件时, 除权日被误标
+        # 涨停锁死、真封死跌停漏检。
+        safe_adjustment = np.where(
+            np.isfinite(current_adjustment) & (current_adjustment > 0),
+            current_adjustment,
+            1.0,
+        )
+        reference = np.where(adjustment_changed, previous_close / safe_adjustment, previous_raw)
         valid = (
             present
             & np.isfinite(reference)
@@ -2451,42 +2462,128 @@ def build_market_matrix(
     """Backward-compatible long-panel boundary used by legacy/Polars strategies."""
     if panel.is_empty():
         raise ValueError("cannot build MarketMatrix from an empty panel")
-    market = build_market_data_matrix(
+    encoding = encode_panel_matrix(
         panel,
-        field_columns={"score", "ma5", "ma10", "ma20"},
+        entry_signal_ids=entry_signal_ids,
+        exit_signal_ids=exit_signal_ids,
     )
+    score = (
+        panel.get_column("score")
+        if "score" in panel.columns and panel["score"].dtype.is_numeric()
+        else None
+    )
+    return build_market_matrix_from_encoding(
+        encoding,
+        score=score,
+        entries=entries,
+        exits=exits,
+        entry_delay_bars=entry_delay_bars,
+        exit_delay_bars=exit_delay_bars,
+        minute_exit_trigger=minute_exit_trigger,
+    )
+
+
+@dataclass(frozen=True)
+class PanelMatrixEncoding:
+    """长面板 → 矩阵的参数无关编码, 供优化器跨参数组复用 (P2a-2)。
+
+    行情矩阵不带 score 场 — score 随参数组的 universe 掩码变化 (_apply_score
+    把非候选行置空), 由 build_market_matrix_from_encoding 逐组散布进信号
+    矩阵; 全部数组只读共享, 复用零拷贝。"""
+
+    market: MarketDataMatrix
+    time_id: np.ndarray
+    asset_id: np.ndarray
+    panel_rows: int
+    entry_signal_code: np.ndarray
+    entry_signal_ids: tuple[str, ...]
+    exit_signal_code: np.ndarray
+    exit_signal_ids: tuple[str, ...]
+    # 编码所用的列序; 调用方与当组 sim_columns 比对, 不一致回退整建
+    # (回退是优化放弃, 不是正确性闸门 — 整建结果总是正确)。
+    sim_columns: tuple[str, ...]
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return self.market.shape
+
+
+def encode_panel_matrix(
+    panel: pl.DataFrame,
+    *,
+    entry_signal_ids: list[str] | None = None,
+    exit_signal_ids: list[str] | None = None,
+) -> PanelMatrixEncoding:
+    """编码面板的参数无关半边: 行情矩阵 + 轴 id + 信号码矩阵。
+
+    score/entry/exit 掩码随参数组变化, 不在编码内 — 见
+    build_market_matrix_from_encoding。"""
+    market = build_market_data_matrix(panel, field_columns={"ma5", "ma10", "ma20"})
     _, _, _, time_id, asset_id = _encode_axes(panel)
     shape = market.shape
-
-    raw_entry = _scatter_bool_series(entries, len(panel), shape, time_id, asset_id)
-    raw_exit = _scatter_bool_series(exits, len(panel), shape, time_id, asset_id)
     entry_codes, normalized_entry_ids = _signal_code_matrix(
-        panel,
-        entry_signal_ids,
-        shape,
-        time_id,
-        asset_id,
+        panel, entry_signal_ids, shape, time_id, asset_id,
     )
     exit_codes, normalized_exit_ids = _signal_code_matrix(
-        panel,
-        exit_signal_ids,
-        shape,
-        time_id,
-        asset_id,
+        panel, exit_signal_ids, shape, time_id, asset_id,
     )
-    score = market.fields.get("score")
+    return PanelMatrixEncoding(
+        market=market,
+        time_id=time_id,
+        asset_id=asset_id,
+        panel_rows=len(panel),
+        entry_signal_code=entry_codes,
+        entry_signal_ids=normalized_entry_ids,
+        exit_signal_code=exit_codes,
+        exit_signal_ids=normalized_exit_ids,
+        sim_columns=tuple(panel.columns),
+    )
+
+
+def build_market_matrix_from_encoding(
+    encoding: PanelMatrixEncoding,
+    *,
+    score: pl.Series | None,
+    entries: pl.Series | None,
+    exits: pl.Series | None,
+    entry_delay_bars: int = 0,
+    exit_delay_bars: int = 0,
+    minute_exit_trigger: bool = False,
+) -> MarketMatrix:
+    """共享编码 + 参数相关的 score/entry/exit → MarketMatrix (优化器试算路径)。
+
+    散布与合成和 build_market_matrix 走同一套件 (_scatter_bool_series /
+    make_signal_matrix / build_market_matrix_from_signals), score 的
+    非有限值→nan 语义与 _float_matrix 一致。"""
+    shape = encoding.shape
+    raw_entry = _scatter_bool_series(
+        entries, encoding.panel_rows, shape, encoding.time_id, encoding.asset_id,
+    )
+    raw_exit = _scatter_bool_series(
+        exits, encoding.panel_rows, shape, encoding.time_id, encoding.asset_id,
+    )
+    score_matrix = None
+    if score is not None and len(score) == encoding.panel_rows:
+        score_matrix = np.full(shape, np.nan, dtype=np.float32)
+        values = np.array(
+            score.cast(pl.Float32, strict=False).to_numpy(),
+            dtype=np.float32,
+            copy=True,
+        )
+        values[~np.isfinite(values)] = np.nan
+        score_matrix[encoding.time_id, encoding.asset_id] = values
     signals = make_signal_matrix(
         shape,
         entry=raw_entry,
         exit=raw_exit,
-        score=np.nan_to_num(score, nan=0.0) if score is not None else None,
-        entry_signal_code=entry_codes,
-        exit_signal_code=exit_codes,
-        entry_signal_ids=normalized_entry_ids,
-        exit_signal_ids=normalized_exit_ids,
+        score=np.nan_to_num(score_matrix, nan=0.0) if score_matrix is not None else None,
+        entry_signal_code=encoding.entry_signal_code,
+        exit_signal_code=encoding.exit_signal_code,
+        entry_signal_ids=encoding.entry_signal_ids,
+        exit_signal_ids=encoding.exit_signal_ids,
     )
     return build_market_matrix_from_signals(
-        market,
+        encoding.market,
         signals,
         entry_delay_bars=entry_delay_bars,
         exit_delay_bars=exit_delay_bars,

@@ -8,12 +8,13 @@ Starter+ 盘后可用 quotes.get(universes) 顺便补充 name。
 from __future__ import annotations
 
 import logging
-from datetime import date
 from pathlib import Path
 
 import polars as pl
 
+from app.market_time import cn_today
 from app.services.fs_utils import atomic_write_parquet
+from app.tickflow import client as tf_client
 from app.tickflow.client import get_client
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 _EXCHANGES = ["SH", "SZ", "BJ"]
 
 
-def _flatten_instruments(items: list[dict]) -> list[dict]:
+def _flatten_instruments(items: list[dict], *, current_limits: bool = True) -> list[dict]:
     """把 SDK 返回的 Instrument 列表 flatten 成扁平行。"""
     rows = []
     for item in items:
@@ -38,8 +39,8 @@ def _flatten_instruments(items: list[dict]) -> list[dict]:
         row["total_shares"] = ext.get("total_shares")
         row["float_shares"] = ext.get("float_shares")
         row["tick_size"] = ext.get("tick_size")
-        row["limit_up"] = ext.get("limit_up")
-        row["limit_down"] = ext.get("limit_down")
+        row["limit_up"] = ext.get("limit_up") if current_limits else None
+        row["limit_down"] = ext.get("limit_down") if current_limits else None
         rows.append(row)
     return rows
 
@@ -81,12 +82,14 @@ def sync_instruments(data_dir: Path) -> int:
     if all_rows is None:
         # 未命中非 tickflow provider → 走 tickflow 直连
         tf = get_client()
+        # 免费接口的限价来自历史行情，不能盖上同步日期当作当日权威价。
+        current_limits = tf_client.current_mode() == "api_key"
         all_rows = []
         for ex in _EXCHANGES:
             try:
                 items = tf.exchanges.get_instruments(ex, instrument_type="stock")
                 if items:
-                    all_rows.extend(_flatten_instruments(items))
+                    all_rows.extend(_flatten_instruments(items, current_limits=current_limits))
                     logger.info("instruments %s: %d stocks", ex, len(items))
             except Exception as e:
                 logger.warning("get_instruments(%s) failed: %s", ex, e)
@@ -95,7 +98,8 @@ def sync_instruments(data_dir: Path) -> int:
         return 0
 
     df = pl.DataFrame(all_rows)
-    df = df.with_columns(pl.lit(date.today()).alias("as_of"))
+    df = _preserve_share_fields(df, data_dir)
+    df = df.with_columns(pl.lit(cn_today()).alias("as_of"))
 
     out = data_dir / "instruments" / "instruments.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -103,6 +107,70 @@ def sync_instruments(data_dir: Path) -> int:
 
     logger.info("instruments synced: %d rows → %s", df.height, out)
     return df.height
+
+
+# 股本与静态交易规则字段: 部分行情源的标的维表只有代码/名称/市场/类型。
+# 这些字段缺失会让 enriched 的 turnover_rate / 市值为空, 进而使
+# 依赖换手率与流通市值的策略筛不出任何标的 —— 因此绝不能用 null 覆盖已有值。
+# 涨跌停价随交易日变化，不从历史维表继承。
+_SHARE_FIELDS = (
+    "listing_date", "total_shares", "float_shares", "tick_size",
+)
+
+
+def _preserve_share_fields(df: pl.DataFrame, data_dir: Path) -> pl.DataFrame:
+    """用现有维表补全 provider 未提供的股本/交易规则字段 (按 symbol 左连接)。
+
+    新增标的仍保留 null (没有历史值可用, 不伪造); 只在同一 symbol 上把
+    provider 的空值替换为既有值, 并在日志里给出补全规模。
+    """
+    available = [c for c in _SHARE_FIELDS if c in df.columns]
+    if not available:
+        return df
+    if all(df[c].null_count() == 0 for c in available):
+        return df  # provider 已提供全部字段, 无需补全
+
+    path = data_dir / "instruments" / "instruments.parquet"
+    if not path.exists():
+        logger.warning(
+            "instruments provider 未提供股本字段且无历史维表可补全: "
+            "enriched 换手率/市值将为 null, 依赖它们的策略会筛不出标的"
+        )
+        return df
+    try:
+        existing = pl.read_parquet(path)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("instruments 历史维表读取失败, 无法补全股本字段: %s", e)
+        return df
+    if "symbol" not in existing.columns:
+        return df
+
+    keep = ["symbol", *[c for c in available if c in existing.columns]]
+    if len(keep) <= 1:
+        return df
+    merged = df.join(existing.select(keep), on="symbol", how="left", suffix="_prev")
+    filled: list[str] = []
+    for col in keep[1:]:
+        prev = f"{col}_prev"
+        if prev not in merged.columns:
+            continue
+        # 逐行 coalesce: provider 有值用 provider, 为空才回落历史值。这样
+        # 「部分标的缺字段」也能补齐, 而不只处理整列为空的源。
+        if merged[col].null_count() and merged[prev].is_not_null().any():
+            merged = merged.with_columns(
+                pl.coalesce(pl.col(col), pl.col(prev)).alias(col)
+            )
+            filled.append(col)
+    merged = merged.drop([f"{c}_prev" for c in keep[1:] if f"{c}_prev" in merged.columns])
+    if filled:
+        restored = int(merged.select(
+            [pl.col(c).is_not_null().sum() for c in filled]
+        ).row(0)[0])
+        logger.info(
+            "instruments provider 缺 %s, 已逐行从历史维表补全 (首列非空 %d/%d)",
+            "/".join(filled), restored, merged.height,
+        )
+    return merged
 
 
 def enrich_names_from_quotes(

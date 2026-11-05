@@ -323,12 +323,13 @@ class JobStore:
                 if cancelled is not None and cancelled.is_set():
                     raise JobCancelledError(job_id)
                 return
+            previous_stage = j["stage"]
             j["stage"] = stage
             j["progress"] = max(0, min(100, int(pct)))
             j["last_progress_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
             if stage_pct is not None:
                 j["stage_pct"] = max(0, min(100, int(stage_pct)))
-            elif j["stage"] != stage:
+            elif previous_stage != stage:
                 j["stage_pct"] = 0
             entry = {
                 "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -381,6 +382,12 @@ class JobStore:
 
     def active_id(self) -> str | None:
         return self._active_id
+
+    def active_status(self) -> JobStatus | None:
+        """仅用于状态展示的内存快照, 不等待持久化锁或读取磁盘。"""
+        job_id = self._active_id
+        active = self._active_jobs.get(job_id) if job_id else None
+        return active.get("status") if active else None
 
     def reap_stale(self, timeout_s: int | None = None) -> None:
         """回收卡死的 running job, 以及排队超时的 pending job。判定:

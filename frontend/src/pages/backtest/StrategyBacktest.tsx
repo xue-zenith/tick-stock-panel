@@ -1,7 +1,8 @@
 import { useState, useMemo, useEffect, useRef, useCallback, memo, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { DailyResultStaleNotice } from '@/components/data/DailyDataHealthNotice'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers, BookmarkPlus, Download, Filter, Star, TrendingUp, CalendarRange } from 'lucide-react'
+import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers, BookmarkPlus, Download, Filter, Star, TrendingUp, CalendarRange, RefreshCw } from 'lucide-react'
 import {
   api,
   type StrategyBacktestResult,
@@ -15,6 +16,7 @@ import {
   REGIME_STATE_COLORS,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { setUiPref } from '@/lib/uiPrefs'
 import { groupParams, visibleParams } from '@/lib/strategyParams'
 import { storage } from '@/lib/storage'
 import { fmtPct, fmtPrice, priceColorClass } from '@/lib/format'
@@ -40,6 +42,7 @@ import { ConditionEditor } from '@/components/signals/ConditionEditor'
 import { WatchlistGroupMenu } from '@/components/WatchlistAddMenu'
 import { ScoringEditor } from '@/components/ScoringEditor'
 import { strategyResultCandidate } from './researchCandidates'
+import { BacktestEvidencePanel } from './components/BacktestEvidencePanel'
 import { buildDailyNavItems, buildTradeKeyMap, buildTradesNavItems, type TradeNavItem } from './tradeNav'
 
 const formatDate = (date: Date) => date.toISOString().slice(0, 10)
@@ -992,7 +995,15 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const [maxPositions, setMaxPositions] = useState(saved?.maxPositions ?? '10')
   const [maxExposure, setMaxExposure] = useState(saved?.maxExposure ?? '100')
   const [initialCapital, setInitialCapital] = useState(saved?.initialCapital ?? '1000000')
-  const [positionSizing, setPositionSizing] = useState<'equal' | 'score_weight'>(saved?.positionSizing ?? 'equal')
+  const [positionSizing, setPositionSizing] = useState<'equal' | 'score_weight' | 'policy'>(saved?.positionSizing ?? 'equal')
+  const [positionPolicyId, setPositionPolicyId] = useState<string>(saved?.positionPolicyId ?? '')
+  const [positionPolicyParams, setPositionPolicyParams] = useState<Record<string, number | boolean | string>>(saved?.positionPolicyParams ?? {})
+  const positionPoliciesQ = useQuery({
+    queryKey: QK.positionPolicies,
+    queryFn: api.positionPolicyList,
+    staleTime: 60_000,
+    enabled: positionSizing === 'policy',
+  })
   const [simMode, setSimMode] = useState<'position' | 'full'>(saved?.mode ?? 'position')
   const [holdingDays, setHoldingDays] = useState(saved?.holdingDays ?? '5')
   const [highGranularity, setHighGranularity] = useState(saved?.minuteFill ?? false)
@@ -1043,8 +1054,12 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     if (cfg.max_positions != null) setMaxPositions(String(cfg.max_positions))
     if (cfg.max_exposure_pct != null) setMaxExposure(String(Math.round(Number(cfg.max_exposure_pct) * 100)))
     if (cfg.initial_capital != null) setInitialCapital(String(cfg.initial_capital))
-    if (cfg.position_sizing === 'equal' || cfg.position_sizing === 'score_weight') {
+    if (cfg.position_sizing === 'equal' || cfg.position_sizing === 'score_weight' || cfg.position_sizing === 'policy') {
       setPositionSizing(cfg.position_sizing)
+      setPositionPolicyId(typeof cfg.position_policy === 'string' ? cfg.position_policy : '')
+      if (cfg.position_policy_params && typeof cfg.position_policy_params === 'object') {
+        setPositionPolicyParams(cfg.position_policy_params as Record<string, number | boolean | string>)
+      }
     }
     if (cfg.mode === 'position' || cfg.mode === 'full') setSimMode(cfg.mode)
     if (cfg.holding_days != null) setHoldingDays(String(cfg.holding_days))
@@ -1134,7 +1149,10 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     ? dataStatus.data?.etf_enriched
     : dataStatus.data?.enriched
   const earliestDate = backtestDataStatus?.earliest_date ?? null
-  const backtestDataUnavailable = dataStatus.isSuccess && !earliestDate
+  // 预热/同步/修复期间统计为 null 是未知态 (stats_pending 契约, 同 Dashboard.isDataStatusPending),
+  // 不得误判成"缺数据"禁用回测 — 等真实统计就绪再判
+  const statsPending = dataStatus.data?.stats_pending === true || dataStatus.data?.indicators_ready === false
+  const backtestDataUnavailable = dataStatus.isSuccess && !statsPending && !earliestDate
   const backtestDataLabel = assetType === 'etf' ? 'ETF 指标数据' : '股票指标数据'
 
   const resetConfigFromDetail = (detail: StrategyDetail) => {
@@ -1212,6 +1230,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
         maxExposure,
         initialCapital,
         positionSizing,
+        positionPolicyId,
+        positionPolicyParams,
         mode: simMode,
         holdingDays,
         minuteFill: isMinuteStrategy ? false : highGranularity,
@@ -1227,7 +1247,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     }
   }, [backtestTask])
 
-  const handleRun = () => {
+  const handleRun = (force = false) => {
     if (!selectedStrategy || backtestDataUnavailable) return
     const requestOverrides = detail
       ? normalizeStrategyOverrides(detail, overrides)
@@ -1248,6 +1268,9 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
       max_exposure_pct: Number(maxExposure) / 100,
       initial_capital: Number(initialCapital),
       position_sizing: positionSizing,
+      ...(positionSizing === 'policy' && positionPolicyId
+        ? { position_policy: positionPolicyId, position_policy_params: positionPolicyParams }
+        : {}),
       params: strategyParams,
       overrides: requestOverrides,
       mode: simMode,
@@ -1259,6 +1282,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
             ...(regimeMinScore !== '' ? { min_score: Number(regimeMinScore) } : {}),
           }
         : null,
+      force,
     })
   }
 
@@ -1278,7 +1302,9 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     mutationFn: () => api.regimeRecompute(regimeGapStart ?? undefined, end || undefined),
     onSuccess: data => {
       toast(`环境数据补算完成 (新增 ${data.computed} 天)，自动重新回测`, 'success')
-      handleRun()
+      // 数据已变, 必须 force: 已失败任务的 error 同样被 5 分钟任务缓存保留,
+      // 不带 force 会命中同参数旧 job 直接重放补算前的报错
+      handleRun(true)
     },
     onError: e => toast(`环境数据补算失败 · ${String((e as Error)?.message || e)}`, 'error'),
   })
@@ -1320,6 +1346,13 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     lines.push(`策略名称,${name}`)
     if (result.strategy_info?.id) lines.push(`策略ID,${result.strategy_info.id}`)
     lines.push(`回测区间,${start} ~ ${end}`)
+    if (result.evidence) {
+      lines.push(`回测编号,${result.run_id}`)
+      lines.push(`数据版本,${result.evidence.data.sha256}`)
+      lines.push(`策略版本,${result.evidence.strategy.sha256}`)
+      lines.push(`参数版本,${result.evidence.config_sha256}`)
+      lines.push(`时间检查状态,${result.evidence.lookahead.status}`)
+    }
     lines.push(`净值曲线天数,${result.equity_curve?.length ?? 0}`)
     lines.push(`完成交易数,${result.trades?.length ?? 0}`)
     lines.push(`总收益,${pct(strategyReturn)}`)
@@ -1654,6 +1687,32 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     .map(([key, label]) => ({ key, label, value: Number(executionStats[key] ?? 0) }))
     .filter(item => item.value > 0)
 
+  // 策略选择区高度: 底部手柄上下拖动调整 (80–480px), 记忆到 localStorage
+  const [strategyListMaxH, setStrategyListMaxH] = useState(() => {
+    try {
+      const v = parseInt(localStorage.getItem('bt_strategy_list_maxh') || '', 10)
+      return v >= 80 && v <= 480 ? v : 128
+    } catch { return 128 }
+  })
+  useEffect(() => {
+    try { setUiPref('bt_strategy_list_maxh', String(strategyListMaxH)) } catch { /* 私有模式等 */ }
+  }, [strategyListMaxH])
+  const listResize = useRef<{ startY: number; startH: number } | null>(null)
+  const onListResizeStart = (e: React.PointerEvent<HTMLDivElement>) => {
+    listResize.current = { startY: e.clientY, startH: strategyListMaxH }
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  const onListResizeMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const st = listResize.current
+    if (!st) return
+    setStrategyListMaxH(Math.min(480, Math.max(80, st.startH + (e.clientY - st.startY))))
+  }
+  const onListResizeEnd = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!listResize.current) return
+    listResize.current = null
+    e.currentTarget.releasePointerCapture(e.pointerId)
+  }
+
   return (
     <div className="h-full min-h-0 overflow-hidden rounded-card border border-border bg-surface/80 grid grid-cols-1 xl:grid-cols-[18rem_minmax(0,1fr)]">
       {/* 配置面板 */}
@@ -1733,7 +1792,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                 </button>
               ))}
             </div>
-            <div className="flex max-h-[128px] flex-wrap gap-1 overflow-y-auto p-1">
+            <div className="flex flex-wrap gap-1 overflow-y-auto p-1" style={{ maxHeight: strategyListMaxH }}>
             {strategies.isLoading && (
               <span className="text-xs text-muted px-2 py-1">加载中…</span>
             )}
@@ -1762,6 +1821,24 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                 )}
               </button>
             ))}
+            </div>
+            {/* 底部拖拽手柄: 上下拉动调整策略列表高度 */}
+            <div
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="拖动调整策略列表高度"
+              tabIndex={0}
+              onPointerDown={onListResizeStart}
+              onPointerMove={onListResizeMove}
+              onPointerUp={onListResizeEnd}
+              onPointerCancel={onListResizeEnd}
+              onKeyDown={e => {
+                if (e.key === 'ArrowDown') setStrategyListMaxH(h => Math.min(480, h + 16))
+                else if (e.key === 'ArrowUp') setStrategyListMaxH(h => Math.max(80, h - 16))
+              }}
+              className="group flex h-2 shrink-0 cursor-ns-resize items-center justify-center border-t border-border/50 bg-base/40 transition-colors hover:bg-accent/10 focus:outline-none focus-visible:bg-accent/15"
+            >
+              <span className="h-0.5 w-8 rounded-full bg-border transition-colors group-hover:bg-accent/60" />
             </div>
           </div>
         </div>
@@ -1967,7 +2044,47 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
             <select value={positionSizing} onChange={e => setPositionSizing(e.target.value as any)} className={INPUT_CLS}>
               <option value="equal">等权买入</option>
               <option value="score_weight">评分加权</option>
+              <option value="policy">自定义策略</option>
             </select>
+            {positionSizing === 'policy' && (
+              <div className="mt-2 space-y-2 rounded-card border border-border bg-surface p-2.5">
+                <select
+                  value={positionPolicyId}
+                  onChange={e => setPositionPolicyId(e.target.value)}
+                  className={INPUT_CLS}
+                >
+                  <option value="">选择仓位策略…</option>
+                  {(positionPoliciesQ.data?.policies ?? []).map(p => (
+                    <option key={p.id} value={p.id}>{p.label}</option>
+                  ))}
+                </select>
+                {(positionPoliciesQ.data?.policies ?? [])
+                  .find(p => p.id === positionPolicyId)
+                  ?.params.map(pd => (
+                    <label key={pd.id} className="flex items-center justify-between gap-2 text-xs text-secondary">
+                      <span className="truncate">{pd.label || pd.id}</span>
+                      {pd.type === 'bool' ? (
+                        <input
+                          type="checkbox"
+                          checked={Boolean(positionPolicyParams[pd.id] ?? pd.default)}
+                          onChange={e => setPositionPolicyParams(prev => ({ ...prev, [pd.id]: e.target.checked }))}
+                        />
+                      ) : (
+                        <input
+                          type="number"
+                          value={Number(positionPolicyParams[pd.id] ?? pd.default ?? 0)}
+                          step={pd.step ?? 'any'}
+                          onChange={e => setPositionPolicyParams(prev => ({ ...prev, [pd.id]: Number(e.target.value) }))}
+                          className={`${INPUT_CLS} w-24`}
+                        />
+                      )}
+                    </label>
+                  ))}
+                <div className="text-[10px] text-muted">
+                  在 设置 → 定义 → 仓位策略 创建与管理; 建仓时按当日候选与历史表现动态分配资金。
+                </div>
+              </div>
+            )}
           </div>
           <div>
             <label className="text-xs font-medium text-secondary block mb-1.5">最大持仓数</label>
@@ -2026,19 +2143,32 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
             停止回测
           </button>
         ) : (
-          <button
-            onClick={handleRun}
-            disabled={!selectedStrategy || strategyDetail.isLoading || backtestDataUnavailable}
-            className="group w-full inline-flex items-center justify-center gap-2.5 rounded-btn border border-accent/40
-              bg-gradient-to-r from-accent to-blue-500 px-3 py-2.5 text-white shadow-[0_10px_24px_rgba(59,130,246,0.22)]
-              transition-all duration-150 ease-smooth hover:-translate-y-0.5 hover:shadow-[0_14px_28px_rgba(59,130,246,0.28)]
-              disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
-          >
-            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-white/18 ring-1 ring-white/25 transition-transform group-hover:scale-105">
-              <Play className="h-3.5 w-3.5 translate-x-px fill-current" />
-            </span>
-            <span className="text-sm font-semibold tracking-wide">运行回测</span>
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => handleRun()}
+              disabled={!selectedStrategy || strategyDetail.isLoading || backtestDataUnavailable}
+              className="group min-w-0 flex-1 inline-flex items-center justify-center gap-2.5 rounded-btn border border-accent/40
+                bg-gradient-to-r from-accent to-blue-500 px-3 py-2.5 text-white shadow-[0_10px_24px_rgba(59,130,246,0.22)]
+                transition-all duration-150 ease-smooth hover:-translate-y-0.5 hover:shadow-[0_14px_28px_rgba(59,130,246,0.28)]
+                disabled:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
+            >
+              <span className="flex h-6 w-6 items-center justify-center rounded-full bg-white/18 ring-1 ring-white/25 transition-transform group-hover:scale-105">
+                <Play className="h-3.5 w-3.5 translate-x-px fill-current" />
+              </span>
+              <span className="text-sm font-semibold tracking-wide">运行回测</span>
+            </button>
+            <button
+              onClick={() => handleRun(true)}
+              disabled={!selectedStrategy || strategyDetail.isLoading || backtestDataUnavailable}
+              title="忽略同参数结果缓存 (保留 5 分钟), 强制重新计算"
+              className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-btn border border-border
+                bg-surface px-3 py-2.5 text-sm font-medium text-secondary transition-colors duration-150 ease-smooth
+                hover:border-accent/40 hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              强制重跑
+            </button>
+          </div>
         )}
       </section>
 
@@ -2152,6 +2282,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
           </div>
         )}
 
+        <DailyResultStaleNotice result={result} assetType={result?.config.asset_type === 'etf' ? 'etf' : 'stock'} />
         {backtestTask?.error && (
           <div className="text-sm text-danger bg-danger/10 border border-danger/30 rounded-btn px-3 py-2">
             <div>{backtestTask.error}</div>
@@ -2226,6 +2357,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
             )}
           </motion.div>
         )}
+
+        {result && <BacktestEvidencePanel key={result.run_id} evidence={result.evidence} />}
 
         {/* 旧全量模拟结果: 固定前瞻收益统计 (兼容历史缓存结果) */}
         {result && !result.error && result.stats && result.stats.mode === 'full' && result.stats.full_kind !== 'candidate_execution' && (

@@ -3,23 +3,24 @@
  *
  * 通过 URL query param ?tab=xxx 同步 Tab 状态。
  */
-import { Suspense, lazy, useState, type ComponentType } from 'react'
+import { Suspense, lazy, useEffect, useState, type ComponentType } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { BarChart3, Database, KeyRound, Package, Radio, SlidersHorizontal, Sparkles, Settings2, PanelLeftClose, PanelLeftOpen, Clock3, Info } from 'lucide-react'
+import { Database, KeyRound, LayoutGrid, Library, Radio, Sparkles, Settings2, PanelLeftClose, PanelLeftOpen, Clock3, Info, PackageOpen } from 'lucide-react'
 // 面板按 tab 按需加载: 8 个面板源码 270KB+, 同步打包会让设置页 chunk 膨胀
 const SettingsAIPanel = lazy(() => import('./settings/AI').then(m => ({ default: m.SettingsAIPanel })))
 const SettingsApiTokensPanel = lazy(() => import('./settings/ApiTokens').then(m => ({ default: m.SettingsApiTokensPanel })))
+const SettingsImportCenterPanel = lazy(() => import('./settings/ImportCenter').then(m => ({ default: m.SettingsImportCenterPanel })))
+const SettingsDefinitionsPanel = lazy(() => import('./settings/Definitions').then(m => ({ default: m.SettingsDefinitionsPanel })))
 const SettingsMonitoringPanel = lazy(() => import('./settings/Monitoring').then(m => ({ default: m.SettingsMonitoringPanel })))
-const SettingsExtPagesPanel = lazy(() => import('./settings/ExtPages').then(m => ({ default: m.SettingsExtPagesPanel })))
-const SettingsPagePacksPanel = lazy(() => import('./settings/PagePacks').then(m => ({ default: m.SettingsPagePacksPanel })))
-const SettingsMenuSettingsPanel = lazy(() => import('./settings/MenuSettings').then(m => ({ default: m.SettingsMenuSettingsPanel })))
+const SettingsPageAdminPanel = lazy(() => import('./settings/PageAdmin').then(m => ({ default: m.SettingsPageAdminPanel })))
 const SettingsTimeoutPanel = lazy(() => import('./settings/Timeout').then(m => ({ default: m.SettingsTimeoutPanel })))
 const SettingsSystemPanel = lazy(() => import('./settings/System').then(m => ({ default: m.SettingsSystemPanel })))
 const SettingsAboutPanel = lazy(() => import('./settings/About').then(m => ({ default: m.SettingsAboutPanel })))
 const SettingsDataSourcesPanel = lazy(() => import('./settings/DataSources').then(m => ({ default: m.SettingsDataSourcesPanel })))
 import { PageHeader } from '@/components/PageHeader'
 import { cn } from '@/lib/cn'
+import { setUiPref } from '@/lib/uiPrefs'
 
 // ===== Tab 定义 =====
 
@@ -34,23 +35,49 @@ type TabDef = {
 const TABS: readonly TabDef[] = [
   { key: 'data-sources', label: '数据源',     icon: Database,  panel: SettingsDataSourcesPanel },
   { key: 'ai',         label: 'AI 设置',    icon: Sparkles,  panel: SettingsAIPanel },
-  { key: 'monitoring', label: '实时监控',   icon: Radio,     panel: SettingsMonitoringPanel },
-  { key: 'ext-pages',  label: '扩展页面',   icon: BarChart3, panel: SettingsExtPagesPanel },
-  { key: 'page-packs',  label: '页面插件',     icon: Package,   panel: SettingsPagePacksPanel },
-  { key: 'timeout',    label: '网络设置',   icon: Clock3,    panel: SettingsTimeoutPanel },
-  { key: 'menus',      label: '菜单设置',   icon: SlidersHorizontal, panel: SettingsMenuSettingsPanel },
-  { key: 'api-tokens', label: '开放接口',   icon: KeyRound, panel: SettingsApiTokensPanel },
-  { key: 'system',     label: '系统设置',   icon: Settings2, panel: SettingsSystemPanel },
-  { key: 'about',      label: '关于',       icon: Info,      panel: SettingsAboutPanel },
+  { key: 'monitoring', label: '实时监控',   icon: Radio,      panel: SettingsMonitoringPanel },
+  { key: 'pages',      label: '页面管理',   icon: LayoutGrid, panel: SettingsPageAdminPanel },
+  { key: 'timeout',    label: '网络设置',   icon: Clock3,     panel: SettingsTimeoutPanel },
+  { key: 'api-tokens', label: '开放接口',   icon: KeyRound,   panel: SettingsApiTokensPanel },
+  { key: 'definitions', label: '定义目录',   icon: Library,    panel: SettingsDefinitionsPanel },
+  { key: 'import',     label: '导入与备份', icon: PackageOpen, panel: SettingsImportCenterPanel },
+  { key: 'system',     label: '系统设置',   icon: Settings2,  panel: SettingsSystemPanel },
+  { key: 'about',      label: '关于',       icon: Info,       panel: SettingsAboutPanel },
 ]
+
+// 「页面管理」归拢前的三个 tab key → 深链子区块, 历史链接零失效
+const LEGACY_PAGE_TAB_SECTIONS: Record<string, string> = {
+  menus: 'menus',
+  'ext-pages': 'ext-pages',
+}
 
 type TabKey = (typeof TABS)[number]['key']
 
 export function Settings() {
   const [searchParams, setSearchParams] = useSearchParams()
   const tabParam = searchParams.get('tab') as TabKey | null
-  const activeTab = TABS.find((t) => t.key === tabParam) ?? TABS[0]
+  // 旧 tab (menus/ext-pages/page-packs) 已并入「页面管理」: 渲染按 pages 处理,
+  // 再用 replace 把 URL 归一化并透传 section, 保持深链与历史记录干净
+  const legacySection = tabParam ? LEGACY_PAGE_TAB_SECTIONS[tabParam] : undefined
+  const legacyImport = tabParam === 'backup' || tabParam === 'page-packs' || (tabParam === 'pages' && searchParams.get('section') === 'page-packs')
+  const activeTab = TABS.find((t) => t.key === (legacyImport ? 'import' : legacySection ? 'pages' : tabParam)) ?? TABS[0]
   const highlight = searchParams.get('highlight') ?? ''
+
+  useEffect(() => {
+    if (legacyImport) {
+      const next = new URLSearchParams(searchParams)
+      next.set('tab', 'import')
+      next.set('view', tabParam === 'backup' ? 'backup' : 'installed')
+      next.delete('section')
+      setSearchParams(next, { replace: true })
+      return
+    }
+    if (!legacySection) return
+    const next = new URLSearchParams(searchParams)
+    next.set('tab', 'pages')
+    next.set('section', legacySection)
+    setSearchParams(next, { replace: true })
+  }, [legacySection, legacyImport, tabParam, searchParams, setSearchParams])
 
   // 设置菜单收起状态 — 持久化到 localStorage
   const [collapsed, setCollapsed] = useState(() => {
@@ -59,7 +86,7 @@ export function Settings() {
   const toggleCollapsed = () => {
     setCollapsed(prev => {
       const next = !prev
-      try { localStorage.setItem('tf-settings-nav-collapsed', next ? '1' : '0') } catch {}
+      try { setUiPref('tf-settings-nav-collapsed', next ? '1' : '0') } catch {}
       return next
     })
   }
@@ -69,12 +96,19 @@ export function Settings() {
       <PageHeader
         title="设置"
         subtitle="管理账户、数据刷新策略和高级功能配置。"
+        className="pl-14 md:pl-5"
       />
 
-      <div className="px-8 py-6">
-        <div className="flex gap-6 items-stretch">
+      <div className="px-4 py-5 sm:px-8 sm:py-6">
+        <div className="flex flex-col gap-6 md:flex-row md:items-stretch">
+          <label className="flex items-center gap-3 text-xs text-secondary md:hidden">
+            设置分类
+            <select aria-label="设置分类" value={activeTab.key} onChange={e => setSearchParams({ tab: e.target.value }, { replace: true })} className="min-h-11 min-w-0 flex-1 rounded-input border border-border bg-surface px-3 text-sm text-foreground">
+              {TABS.map(tab => <option key={tab.key} value={tab.key}>{tab.label}</option>)}
+            </select>
+          </label>
           {/* ===== 竖向 Tab 侧栏 ===== */}
-          <nav className={cn('shrink-0 transition-all duration-200 ease-smooth', collapsed ? 'w-10' : 'w-36')}>
+          <nav aria-label="设置分类" className={cn('hidden shrink-0 transition-all duration-200 ease-smooth md:block', collapsed ? 'w-10' : 'w-36')}>
             <div className="flex flex-col gap-0.5 justify-center min-h-[60vh] sticky top-6">
               {/* 收起/展开 按钮 */}
               <button

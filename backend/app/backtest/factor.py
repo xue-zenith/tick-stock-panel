@@ -161,6 +161,23 @@ class FactorBacktestService:
     def __init__(self, engine: BacktestEngine) -> None:
         self.engine = engine
 
+    # 盘中实时刷新 (默认 ~6s 一轮) 每轮换新 generation, 快照式读取撞上发布属常态
+    # (issue #517): 有界重读新世代整体重跑, 而不是 attempts=1 直接失败。
+    _SNAPSHOT_MAX_ATTEMPTS = 3
+    _SNAPSHOT_RETRY_SLEEP_S = 1.0
+
+    def _with_snapshot_retry(self, body):
+        from app.enriched_generation import EnrichedGenerationUnavailableError
+
+        for attempt in range(self._SNAPSHOT_MAX_ATTEMPTS):
+            if attempt:
+                time.sleep(self._SNAPSHOT_RETRY_SLEEP_S)
+            try:
+                return body()
+            except EnrichedGenerationUnavailableError:
+                if attempt + 1 >= self._SNAPSHOT_MAX_ATTEMPTS:
+                    raise
+
     def run(
         self,
         config: FactorConfig,
@@ -170,7 +187,9 @@ class FactorBacktestService:
         from app.services.heavy_job_limiter import shared_heavy_job_limiter
 
         with shared_heavy_job_limiter.slot("exclusive"):
-            return self._run(config, regime_by_date=regime_by_date)
+            return self._with_snapshot_retry(
+                lambda: self._run(config, regime_by_date=regime_by_date)
+            )
 
     def _run(
         self,
@@ -225,7 +244,9 @@ class FactorBacktestService:
         from app.services.heavy_job_limiter import shared_heavy_job_limiter
 
         with shared_heavy_job_limiter.slot("exclusive"):
-            return self._run_batch(config, regime_by_date=regime_by_date)
+            return self._with_snapshot_retry(
+                lambda: self._run_batch(config, regime_by_date=regime_by_date)
+            )
 
     def _run_batch(
         self,
@@ -1210,7 +1231,8 @@ class FactorBacktestService:
                 rets = arr[1:] / prev - 1.0
             rets = rets[prev > 0]
             if rets.size:
-                std = float(np.std(rets))
+                # 样本标准差 (ddof=1), 与 engine 的 Sharpe 口径一致
+                std = float(np.std(rets, ddof=1))
                 sharpe = float(np.mean(rets) / std) * np.sqrt(_ann) if std > 0 else 0.0
                 win_rate = float(np.mean(rets > 0))
             else:
@@ -1280,7 +1302,7 @@ class FactorBacktestService:
             config.rebalance,
             252,
         )
-        ls_std = float(np.std(ls_ret))
+        ls_std = float(np.std(ls_ret, ddof=1))  # 样本标准差, 与 engine 口径一致
         sharpe = (
             float(np.mean(ls_ret) / ls_std) * np.sqrt(ann_factor)
             if ls_std > 1e-8

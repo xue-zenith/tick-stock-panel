@@ -43,6 +43,7 @@ import { QK } from '@/lib/queryKeys'
 import { usePreferences } from '@/lib/useSharedQueries'
 import { useToggleRealtimeQuotes } from '@/lib/useSharedMutations'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
+import { MiningLockControl } from './components/MiningLockControl'
 import { FactorCorrelationHeatmap } from './charts/FactorCorrelationHeatmap'
 import { MiningOosChart } from './charts/MiningOosChart'
 import { RegimeComparisonChart } from './charts/RegimeComparisonChart'
@@ -649,7 +650,7 @@ export function MiningWorkbench() {
       return { recomputed, job }
     },
     onSuccess: ({ recomputed, job }) => {
-      for (const key of [QK.regimeLatest, QK.regimeCoverage, QK.regimeHistory()]) {
+      for (const key of [QK.regimeLatest, QK.regimeCoverage, QK.regimeHistoryPrefix]) {
         queryClient.invalidateQueries({ queryKey: key })
       }
       toast(recomputed.computed > 0 ? `环境补算完成 · 新增 ${recomputed.computed} 天，重新开始挖掘` : '环境数据已是最新，重新开始挖掘', 'success')
@@ -668,6 +669,8 @@ export function MiningWorkbench() {
   }
 
   return (
+    <>
+    <MiningLockControl />
     <div className="grid min-h-[calc(100vh-9rem)] grid-cols-1 overflow-hidden rounded-card border border-border bg-surface xl:grid-cols-[20rem_minmax(0,1fr)]">
       <aside className="border-b border-border bg-base/25 xl:max-h-[calc(100vh-9rem)] xl:overflow-y-auto xl:border-b-0 xl:border-r">
         <div className="flex items-center justify-between border-b border-border px-3 py-2">
@@ -893,5 +896,6 @@ export function MiningWorkbench() {
         </div>
       )}
     </div>
+    </>
   )
 }

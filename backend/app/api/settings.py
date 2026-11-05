@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app import secrets_store
@@ -668,6 +670,9 @@ def get_preferences() -> dict:
         "instruments_schedule": preferences.get_instruments_schedule(),
         "enriched_batch_size": preferences.get_enriched_batch_size(),
         "index_daily_batch_size": preferences.get_index_daily_batch_size(),
+        "daily_batch_symbols": preferences.get_daily_batch_symbols(),
+        "minute_batch_symbols": preferences.get_minute_batch_symbols(),
+        "backtest_worker_rss_limit_gib": preferences.get_backtest_worker_rss_limit_gib(),
         "watchlist_columns": preferences.get_watchlist_columns(),
         "screener_result_columns": preferences.get_screener_result_columns(),
         "sse_refresh_pages": preferences.get_sse_refresh_pages(),
@@ -693,12 +698,18 @@ def get_preferences() -> dict:
         "nav_hidden": preferences.get_nav_hidden(),
         "dashboard_layout": preferences.get_dashboard_layout(),
         "screener_auto_run": preferences.get_screener_auto_run(),
+        "assistant_auto_approve_actions": preferences.get_assistant_auto_approve_actions(),
+        "assistant_mask_enabled": preferences.get_assistant_mask_enabled(),
         "limit_ladder_monitor_enabled": preferences.get_limit_ladder_monitor_enabled(),
         "depth_polling_interval": preferences.get_depth_polling_interval(),
         "depth_finalize_time": preferences.get_depth_finalize_time(),
         "review_schedule": preferences.get_review_schedule(),
         "review_push_channels": preferences.get_review_push_channels(),
         "review_push_mode": preferences.get_review_push_mode(),
+        "market_recap_system_prompt": preferences.get_market_recap_system_prompt(),
+        # 界面偏好 (通知弹窗/声效/语音播报/外链模板/界面缩放): 历史只存 localStorage,
+        # 桌面版端口变化后 origin 改变导致读取不到 — 后端保存权威副本, 前端启动时回填。
+        "ui_prefs": preferences.get_ui_prefs(),
         **preferences.get_mining_schedule(),
     }
 
@@ -747,7 +758,7 @@ def save_plugin_key(req: PluginKeyIn) -> dict:
     """保存插件 API Key(先探后存, 对齐 /tickflow-key 语义)。
 
     流程: probe_plugin_key 用候选 Key 实探 → 有效才写 secrets.json
-    ({plugin}_api_key, 优先级高于 .env) → load_all 重扫, 插件即刻变为可切换。
+    ({plugin}_api_key, 优先级高于 .env) → 定向刷新当前插件。
     """
     from app.data_providers import custom as custom_sources
 
@@ -755,11 +766,27 @@ def save_plugin_key(req: PluginKeyIn) -> dict:
     key = req.api_key.strip()
     if not key:
         return {"ok": False, "error": "key empty"}
-    ok, message = custom_sources.probe_plugin_key(name, key)
-    if not ok:
-        return {"ok": False, "reason": "invalid", "error": message}
-    secrets_store.save({f"{name}_api_key": key})
-    custom_sources.load_all()
+    from contextlib import nullcontext
+
+    from app.data_providers.custom import packages
+    external = packages.read_state(name) is not None
+    with packages.mutation() if external else nullcontext():
+        ok, message = custom_sources.probe_plugin_key(name, key)
+        if not ok:
+            return {"ok": False, "reason": "invalid", "error": message}
+        previous = secrets_store.load().get(f"{name}_api_key") if external else None
+        secrets_store.save({f"{name}_api_key": key})
+        try:
+            if external:
+                custom_sources.refresh_plugin(name, strict=True)
+            else:
+                custom_sources.refresh_plugin(name)
+        except ValueError:
+            if previous is None:
+                secrets_store.clear(f"{name}_api_key")
+            else:
+                secrets_store.save({f"{name}_api_key": previous})
+            return {"ok": False, "error": "插件初始化失败，已保留原配置"}
     status = next((p for p in custom_sources.list_plugins() if p["name"] == name), None)
     return {
         "ok": True,
@@ -775,12 +802,12 @@ def clear_plugin_key(name: str) -> dict:
     from app.data_providers import custom as custom_sources
 
     manifest = custom_sources.plugin_manifest(name)
-    if manifest is None or not custom_sources.is_builtin(name):
+    if manifest is None:
         raise HTTPException(status_code=404, detail=f"插件 '{name}' 不存在")
     if not manifest.get("api_key_env"):
         raise HTTPException(status_code=400, detail=f"插件 '{name}' 不支持在界面配置 Key")
     secrets_store.clear(f"{name.lower()}_api_key")
-    custom_sources.load_all()
+    custom_sources.refresh_plugin(name)
     status = next((p for p in custom_sources.list_plugins() if p["name"] == name), None)
     return {
         "ok": True,
@@ -941,10 +968,15 @@ def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
     """保存数据源选择。"""
     from app.services import preferences
     updates = req.model_dump(exclude_none=True)
-    if updates:
-        preferences.save(updates)
-    # 刷新能力快照: 当前 provider 变化会改变自定义源能力增广结果 (读缓存, 无网络请求)
-    request.app.state.capabilities = detect_capabilities()
+    with preferences.mutation():
+        from app.data_providers import custom as custom_sources
+        removing = {p["name"] for p in custom_sources.list_plugins() if p.get("pending_remove")}
+        if any(provider.lower() in removing for provider in updates.values()):
+            raise HTTPException(400, "该插件正在等待卸载，请选择其他数据源")
+        if updates:
+            preferences.save(updates)
+        # 与插件卸载共用写锁，避免并发请求重新引用已移除的数据源。
+        request.app.state.capabilities = detect_capabilities()
     return {
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
@@ -1057,6 +1089,27 @@ def get_screener_result_columns() -> dict:
     return {"columns": cols}
 
 
+class UiPrefsIn(BaseModel):
+    """界面偏好增量更新; 值为 null = 删除该项 (回前端默认)。"""
+
+    model_config = ConfigDict(extra="allow")
+
+
+@router.put("/preferences/ui-prefs")
+def update_ui_prefs(req: UiPrefsIn) -> dict:
+    """保存界面偏好 (通知弹窗/声效/语音播报/外链模板/界面缩放)。
+
+    键集合由 services.preferences 的白名单约束 (未知键忽略); 用 extra=allow 的
+    透传模型而非逐字段声明, 新增一项只需前后端各加一个键, 不产生两处易漂移的清单。
+    """
+    from app.services import preferences
+    try:
+        saved = preferences.set_ui_prefs(req.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ui_prefs": saved}
+
+
 @router.put("/preferences/screener-result-columns")
 def update_screener_result_columns(req: dict) -> dict:
     """保存策略结果列表列配置。"""
@@ -1161,12 +1214,14 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
         if repo is not None:
             try:
                 issues = data_integrity.scan_recent_integrity(repo.store.data_dir)
+                issues = [i for i in issues if i.table in data_integrity.active_daily_tables()]
             except Exception:  # noqa: BLE001
                 issues = []
             earliest = data_integrity.earliest_issue_day(issues)
             if issues and data_integrity.within_auto_repair_window(earliest):
+                symbols = data_integrity._stock_snapshot_symbols(issues)
                 job_id, is_new = data_integrity.launch_integrity_repair(
-                    request.app.state, earliest, "realtime_gate",
+                    request.app.state, earliest, "realtime_gate", symbols=symbols,
                 )
                 if job_id is not None:
                     detail = (
@@ -1176,6 +1231,16 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
                         + f"（任务 {job_id}）"
                     )
                     raise HTTPException(status_code=409, detail=detail)
+                backoff = data_integrity.repair_backoff_remaining_s(
+                    repo.store.data_dir, earliest,
+                )
+                if backoff > 0:
+                    raise HTTPException(status_code=409, detail=(
+                        f"检测到{data_integrity.describe_issues(issues)}；"
+                        f"上次自动修复未成功（多为数据源拉取失败），"
+                        f"{int(backoff // 60) + 1} 分钟后将自动重试，"
+                        "也可到 数据→修正数据 手动执行"
+                    ))
 
     preferences.save({"realtime_quotes_enabled": req.realtime_quotes_enabled})
     if qs:
@@ -1194,6 +1259,42 @@ def update_realtime_quote_scope(req: RealtimeQuoteScopePrefs) -> dict:
     from app.services import preferences
     cfg = req.model_dump(exclude_none=True)
     return preferences.set_realtime_quote_scope(cfg)
+
+
+class AssistantAutoApproveIn(BaseModel):
+    """AI 助手动作工具免确认开关。"""
+
+    enabled: bool
+
+
+@router.put("/preferences/assistant-auto-approve")
+def update_assistant_auto_approve(req: AssistantAutoApproveIn) -> dict:
+    """保存 AI 助手「动作工具免确认」开关。
+
+    打开后 create_signal_strategy / run_backtest / add_to_watchlist / sync_data
+    不再弹确认卡, 直接执行。默认关闭; 轮次检查点不受影响。
+    """
+    from app.services import preferences
+    saved = preferences.set_assistant_auto_approve_actions(req.enabled)
+    return {"assistant_auto_approve_actions": saved}
+
+
+class AssistantMaskIn(BaseModel):
+    """AI 助手毛玻璃遮罩开关。"""
+
+    enabled: bool
+
+
+@router.put("/preferences/assistant-mask")
+def update_assistant_mask(req: AssistantMaskIn) -> dict:
+    """保存 AI 助手「毛玻璃遮罩」开关 (默认开启)。
+
+    开启时助手抽屉背后覆盖毛玻璃遮罩, 点击遮罩关闭助手;
+    关闭则恢复非模态体验 (页面主体可正常交互)。纯视觉偏好, 无副作用。
+    """
+    from app.services import preferences
+    saved = preferences.set_assistant_mask_enabled(req.enabled)
+    return {"assistant_mask_enabled": saved}
 
 
 class WatchlistGroupsInNavPrefs(BaseModel):
@@ -1991,6 +2092,37 @@ def update_index_daily_batch_size(req: IndexDailyBatchSizeIn) -> dict:
     return {"index_daily_batch_size": size}
 
 
+class BatchSymbolsIn(BaseModel):
+    size: int
+
+
+@router.put("/preferences/daily-batch-symbols")
+def update_daily_batch_symbols(req: BatchSymbolsIn) -> dict:
+    """保存 daily-batch 单请求标的数上限 (同时是前端分块大小)。"""
+    from app.services import preferences
+    return {"daily_batch_symbols": preferences.set_daily_batch_symbols(req.size)}
+
+
+@router.put("/preferences/minute-batch-symbols")
+def update_minute_batch_symbols(req: BatchSymbolsIn) -> dict:
+    """保存 minute-batch 单请求标的数上限 (同时是前端分块大小)。"""
+    from app.services import preferences
+    return {"minute_batch_symbols": preferences.set_minute_batch_symbols(req.size)}
+
+
+class BacktestWorkerRssLimitIn(BaseModel):
+    gib: int = Field(ge=0, le=64, description="回测/优化 worker RSS 上限 (GiB), 0 = 不限制")
+
+
+@router.put("/preferences/backtest-worker-rss-limit")
+def update_backtest_worker_rss_limit(req: BacktestWorkerRssLimitIn) -> dict:
+    """保存回测/优化 worker RSS 内存上限 (GiB)。对下一个任务即生效, 无需重启。"""
+    from app.services import preferences
+    return {
+        "backtest_worker_rss_limit_gib": preferences.set_backtest_worker_rss_limit_gib(req.gib)
+    }
+
+
 # ── 五档盘口 sealed 配置 ──────────────────────────────
 
 class LimitLadderMonitorIn(BaseModel):
@@ -2144,6 +2276,35 @@ def update_review_push(req: ReviewPushIn) -> dict:
     return {"review_push_channels": saved, "review_push_mode": mode}
 
 
+class MarketRecapPromptIn(BaseModel):
+    prompt: str  # 自定义系统提示词全文; 空串 = 恢复内置默认模板
+
+
+@router.get("/preferences/market-recap-prompt")
+def get_market_recap_prompt() -> dict:
+    """复盘系统提示词: 自定义值 + 内置默认全文。
+
+    默认全文单独按需拉取 (约 2.4k 字符), 不塞进 GET /preferences 大 dict。
+    """
+    from app.services import preferences
+    from app.services.market_recap import _SYSTEM_PROMPT
+
+    custom = preferences.get_market_recap_system_prompt()
+    return {"custom": custom, "default": _SYSTEM_PROMPT, "customized": bool(custom)}
+
+
+@router.put("/preferences/market-recap-prompt")
+def update_market_recap_prompt(req: MarketRecapPromptIn) -> dict:
+    """保存自定义复盘系统提示词; 空串恢复默认模板。超长返回 400。"""
+    from app.services import preferences
+
+    try:
+        saved = preferences.set_market_recap_system_prompt(req.prompt)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"custom": saved, "customized": bool(saved)}
+
+
 # ================================================================
 # API Token 管理 (open-platform-plan §4) — 仅 UI 会话可达
 # (挂在 /api/settings 前缀下, 受访问密码保护; Token 通道无对应 scope,
@@ -2180,3 +2341,95 @@ def api_tokens_revoke(token_id: str, request: Request) -> dict:
     if not svc.revoke_token(request.app.state.repo.store.data_dir, token_id):
         raise HTTPException(status_code=404, detail=f"Token '{token_id}' 不存在")
     return {"status": "revoked", "id": token_id}
+
+
+# ── 声效语音包: 用户上传自定义提示音 (data/sound_packs), 前端以 custom:<文件名> 选择 ──
+
+_SOUND_PACK_DIR = "sound_packs"
+# 浏览器 <audio> 即取即播, 单文件无需过大; 过大的文件上传慢且占磁盘
+_SOUND_PACK_MAX_BYTES = 4 * 1024 * 1024
+_SOUND_PACK_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac", ".opus", ".webm"}
+_SOUND_PACK_MEDIA_TYPES = {
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg",
+    ".m4a": "audio/mp4", ".aac": "audio/aac", ".flac": "audio/flac",
+    ".opus": "audio/ogg", ".webm": "audio/webm",
+}
+
+
+def _sound_pack_dir(request: Request) -> Path:
+    return request.app.state.repo.store.data_dir / _SOUND_PACK_DIR
+
+
+def _safe_pack_path(pack_dir: Path, name: str) -> Path:
+    """名字 → 目录内路径; 拒绝穿越/非法名。"""
+    if not name or "/" in name or "\\" in name or ".." in name or name != name.strip():
+        raise HTTPException(status_code=400, detail="语音包名称非法")
+    path = (pack_dir / name).resolve()
+    if path.parent != pack_dir.resolve():
+        raise HTTPException(status_code=400, detail="语音包名称非法")
+    return path
+
+
+@router.get("/sound-packs")
+def sound_packs_list(request: Request) -> dict:
+    pack_dir = _sound_pack_dir(request)
+    packs: list[dict] = []
+    if pack_dir.is_dir():
+        for f in sorted(pack_dir.iterdir()):
+            if f.is_file() and f.suffix.lower() in _SOUND_PACK_EXTS:
+                packs.append({
+                    "name": f.name,
+                    "size": f.stat().st_size,
+                    "ext": f.suffix.lower().lstrip("."),
+                })
+    return {"packs": packs}
+
+
+@router.post("/sound-packs")
+async def sound_packs_upload(request: Request, file: UploadFile = File(...)) -> dict:
+    import re
+
+    raw = file.filename or ""
+    suffix = Path(raw).suffix.lower()
+    if suffix not in _SOUND_PACK_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的音频格式 '{suffix or '(无后缀)'}', 可选: {', '.join(sorted(_SOUND_PACK_EXTS))}",
+        )
+    # 词干只保留安全字符 (中文/字母/数字/_-.), 其余替换为 _; 控制长度防文件名失控
+    stem = re.sub(r"[^\w\-.()\u4e00-\u9fff]", "_", Path(raw).stem).strip("._")[:40] or "pack"
+    name = f"{stem}{suffix}"
+
+    data = await file.read()
+    if len(data) > _SOUND_PACK_MAX_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"文件超过 {_SOUND_PACK_MAX_BYTES // 1024 // 1024}MB 上限 (当前 {len(data) / 1024 / 1024:.1f}MB)",
+        )
+    if not data:
+        raise HTTPException(status_code=400, detail="空文件")
+
+    pack_dir = _sound_pack_dir(request)
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    target = _safe_pack_path(pack_dir, name)
+    # 同名重传 = 替换 (用户自定义音的自然语义)
+    target.write_bytes(data)
+    return {"status": "saved", "pack": {"name": name, "size": len(data), "ext": suffix.lstrip(".")}}
+
+
+@router.delete("/sound-packs/{name}")
+def sound_packs_delete(name: str, request: Request) -> dict:
+    path = _safe_pack_path(_sound_pack_dir(request), name)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"语音包 '{name}' 不存在")
+    path.unlink()
+    return {"status": "deleted", "name": name}
+
+
+@router.get("/sound-packs/{name}/file")
+def sound_packs_file(name: str, request: Request) -> FileResponse:
+    path = _safe_pack_path(_sound_pack_dir(request), name)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"语音包 '{name}' 不存在")
+    media_type = _SOUND_PACK_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(path, media_type=media_type)

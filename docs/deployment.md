@@ -16,6 +16,7 @@ docker run -d --name tsp -p 3018:3018 -v ${PWD}/data:/app/data ghcr.io/shy3130/t
 ```
 
 - 需要配置时:从 `.env.example` 复制出 `.env`,命令里加 `--env-file .env`。
+- 自定义数据源等服务跑在宿主机、容器内需通过 `host.docker.internal` 访问时,Linux 的 `docker run` 要在命令里加 `--add-host=host.docker.internal:host-gateway`(Docker Desktop 的 macOS/Windows 默认已可解析;方式 B 的 compose 已在 `extra_hosts` 配好),否则报 `Name or service not known`。
 - 镜像默认不含 `legacy-cpu` / `backtest` extras —— 老 CPU(无 AVX2)或需要 vectorbt 回测时,请用方式 B 通过 `BACKEND_EXTRAS` 自构建。
 - 跑自己改过的代码:fork 后到仓库 Actions 页启用 workflow(fork 默认禁用),构建出的 `ghcr.io/<你的用户名>/tick-stock-panel` 用法相同。
 - 想要 compose 全套挂载(`.env` / `tiers.yaml` / 数据卷):参考根目录 `docker-compose.yml`,把 `build:` 段换成 `image: ghcr.io/shy3130/tick-stock-panel:latest`。
@@ -117,6 +118,8 @@ git pull
 ```
 
 > 用方式 A 镜像直跑(无本地仓库)的用户:`docker pull ghcr.io/shy3130/tick-stock-panel:latest` 后删除旧容器重跑;compose 换 `image:` 的用户执行 `docker compose pull && docker compose up -d`。
+
+> ⚠️ **方式 A 重建容器时必须保留原有的 `-v ${PWD}/data:/app/data` 挂载参数。** 遗漏挂载后新数据会写进容器层,随旧容器删除而**静默丢失**;之后重新挂载,读到的会是宿主机目录里的旧副本,表现为「配置被重置回默认值」。升级前建议先备份 `data/` 目录。
 
 **整个 `data/` 目录都不纳入 git** —— 行情 K线、财务、自选、回测、监控记录,乃至概念/行业扩展数据,全部是程序运行时生成/拉取的用户数据,`git pull` 物理上无法影响它们。新用户首次启动时,概念/行业两份扩展数据会自动从远程接口拉取,无需任何手动操作。
 
@@ -302,3 +305,70 @@ Paper/Simulate 和 REAL 环境严格区分；默认 `read_only=true`，未完成
 - **数据隔离**：`data/live_trading/oms.db` 是实盘账本，包含意图/审批/风控/回报/审计，不与模拟盘数据混用
 - **对账调度器**：后台 asyncio 任务，启动即跑一次 boot reconcile，之后按 30s（订单）/60s（持仓）/15:05（日终）周期对账
 - **首次使用**：安装并注册真实适配器 → 创建账户 → 连接 → 手动对账（或等调度器）→ Arm → 提交意图 → 审批并送单 → 券商回报/对账确认
+
+---
+
+## 多窗口与多人共享访问
+
+同一部署可以由多个浏览器窗口、设备同时访问。API 主进程保持 **1 个**
+(`uvicorn --workers 1`，现有启动方式默认如此)，计算子进程继续沿用回测/优化的
+既有机制。当前队列、缓存与限额在进程内共享，不能通过增加 API workers 或让多个
+容器同时写同一数据目录来扩容。登录和用户数据仍采用现有单密码、共享数据模式。
+
+### 请求和计算的区别
+
+- 行情统一采集并广播；每个 SSE 连接异步等待，不独占一个等待线程。
+- 策略页自动加载和查看单策略时发送可选的 `ensure: true`：相同输入正在计算时复用
+  执行，有效结果短期复用。旧客户端不传该字段仍保留手动重跑语义。
+- 自动结果最长复用 6 秒，并检查数据版本、策略定义、有效参数、资产、周期、日期
+  等输入。策略代码热重载、参数修改和日K修补后不复用旧输入的结果。
+- 重叠策略批次可复用已计算的单策略结果；不同业务输入独立计算。
+- 分钟批量查询将同一数据源、资产、价格基准、时间范围和标的的补拉合并；重叠标的
+  不重复并发拉取或落盘。本地分区变化使旧补拉缓存失效，结果最多缓存 2 秒。
+  `since` 仍只控制返回增量；原始价落盘、读取时复权以及残缺数据回退语义保持不变。
+- 交易日探针的冷请求共享一次探测。上游缓慢时，等待者短暂等待后按现有“未知”
+  语义降级，避免占满 HTTP 线程；交易日、休市、未知的原有 TTL 不变。
+- 轮询任务状态只读取状态，不创建新任务。新客户端按后端任务 ID 跟踪完成、失败，
+  不把其他批次的旧缓存当成本次完成。
+
+### 过载时的行为
+
+| 项目 | 默认边界 |
+| --- | --- |
+| 策略批量任务 | 最多 32 个活跃/排队批次，串行执行 |
+| 策略输入准备和计算 | 共用重任务独占额度，兼容仓库冷启动预热 |
+| 重任务等待队列 | 最多 32 个等待者，默认最多等待 120 秒 |
+| 回测/优化 SSE 任务 | 最多 32 个活跃任务；完成结果最多保留 16 条、5 分钟 |
+| 已登录会话或 Token | 每分钟最多新建 30 个策略/回测计算任务；读取、订阅和复用不重复扣额度 |
+| 分钟补拉结果 | 最多 8192 个标的/范围缓存项，总估算数据大小不超过 32 MiB |
+
+队列满或等待超时时返回 `503` 和 `Retry-After`，前端退避重试。已缓存数据的读取和
+健康检查不占计算额度。自动计算失败有短暂冷却，任务失败、取消或启动失败会释放占用。
+未设密码的本机部署保持原有会话行为，同时仍受全局计算容量约束。
+
+SSE 合并重复版本通知；隐藏页面暂停相关行情/策略数据回拉，恢复可见后检查数据。
+策略列表实时价格仍保留轮询，避免未加入监控的策略漏更新；轮询与 SSE 重连加入错峰。
+Parquet、策略文件和既有配置无需迁移，新响应元数据均为可选字段。
+
+### 观测与验证
+
+登录后可读取 `GET /api/data/workload`，查看请求量、实际执行量、复用/缓存命中、
+失败次数、队列、缓存和 SSE 订阅数。统计为进程级、有界计数，不记录请求参数、会话
+凭据或用户数据，重启后清零；此接口沿用面板认证，不额外开放 Token scope。
+
+相关回归与可重复的模拟 HTTP 压测：
+
+```bash
+cd backend
+uv run --frozen pytest tests/test_workload.py tests/test_shared_work.py \
+  tests/test_strategy_run_queue.py tests/test_screener_run_all_progressive.py \
+  tests/test_minute_shared_pull.py tests/test_kline_minute_batch_pull_fallback.py \
+  tests/test_heavy_job_limiter.py tests/test_backtest_job_admission.py \
+  tests/test_strategy_realtime_refresh.py tests/test_trading_day.py -q
+uv run --frozen pytest tests/test_multi_client_http.py -q -s
+```
+
+HTTP 压测使用隔离存储和计数用的模拟策略引擎，覆盖 1/10/30/100 个客户端、
+完成后再次访问、单策略查看、轮询、手动重跑、不同任务过载和健康检查。
+它验证调度与去重，不能据此推断真实历史数据下的可承载人数。上线容量仍需在目标
+服务器上按实际数据量、页面组合、任务规模和持续时间测量 CPU、内存与响应延迟。

@@ -20,6 +20,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Callable
+from datetime import date
 from datetime import timedelta as _timedelta
 from pathlib import Path
 
@@ -119,6 +120,10 @@ ENRICHED_STORAGE_COLS = [
     "consecutive_limit_downs",
     "quote_ts",                                # 行情时间戳(ms): 盘后校验/量比折算/跨天完整性
 ]
+
+# 长任务等待实时发布让出的上限。实时行情每轮持有发布几毫秒到几百毫秒,
+# 60s 足以跨过任意一轮; 超过则说明确有其他长任务在跑, 继续等没有意义。
+_PUBLICATION_CLAIM_WAIT_S = 60.0
 
 
 # ================================================================
@@ -649,7 +654,9 @@ def _needed_references_limit_prices(needed: set[str]) -> bool:
             return True
     return False
 
-def compute_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.DataFrame:
+def compute_signals(
+    df: pl.DataFrame, needed: set[str] | None = None, *, attach_extensions: bool = True,
+) -> pl.DataFrame:
     """注入自定义信号布尔列 (含迁移自内置的 signal_* 定义)。
 
     输入必须包含 compute_indicators() 产出的指标列。
@@ -662,7 +669,8 @@ def compute_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.Data
     # 都按列存在性解析。历史多日帧仅注入时序模式 —— 快照代表"最新值",
     # 历史回看注入会引入未来数据 (CONTRIBUTING §5.3)。
     from app.factors import ext_factors
-    df = ext_factors.attach_ext_columns(df, include_snapshot=False)
+    if attach_extensions:
+        df = ext_factors.attach_ext_columns(df, include_snapshot=False)
     # 条件引用的注册表因子列先复用评分物化管线补算 (虚拟/自定义/复合均可)。
     from app.strategy import custom_signals
     exprs = _get_custom_signal_exprs()
@@ -801,19 +809,26 @@ def compute_limit_signals(
         df = df.with_columns(pl.lit(None).cast(pl.Float64).alias("turnover_rate"))
 
     # 前一日参考收盘价（交易所涨跌停基准价）
-    # 仅在 adj_factor 发生变化（除权除息 XD/DR）时使用前复权昨收作为交易所参考价;
-    # 否则使用原始 raw_close.shift(1) 以避免浮点精度误差。
+    # 仅在 adj_factor 发生变化（除权除息 XD/DR）时用 前复权昨收/当日复权比例 还原到
+    # 当日口径 (即交易所除权参考价 = raw_prev / ex_factor); 否则使用原始
+    # raw_close.shift(1) 以避免浮点精度误差。注意不能直接用前复权昨收 —— 它还被
+    # 更晚的除权事件缩放过, 会把限价压低 F(prev)/F(today) 倍 (除权日误判封板)。
     if not need_price_limits:
         cleanup = [c for c in ("name", "float_shares", "limit_up", "limit_down", "listing_date") if c in df.columns]
         return df.drop(cleanup)
 
     _adj_today = pl.col("close") / pl.col("raw_close")
     _adj_yesterday = pl.col("close").shift(1).over("symbol") / pl.col("raw_close").shift(1).over("symbol")
-    _adj_changed = (_adj_today - _adj_yesterday).abs() > 1e-6
+    # raw_close=0 等脏行会让 _adj_today 变 inf: 不守卫的话 then 分支除以 inf 得
+    # 参考价 0, 产出行内一致的"涨停价 0"; 这里要求比例有限且为正, 脏行退化为
+    # 原始昨收口径 (与 matrix 路径的 current_raw>0 守卫对齐)。
+    _adj_changed = (
+        (_adj_today - _adj_yesterday).abs() > 1e-6
+    ) & _adj_today.is_finite() & (_adj_today > 0)
     df = df.with_columns(
         pl.when(_adj_changed)
-        .then(pl.col("close").shift(1).over("symbol"))   # 除权: 使用前复权昨收
-        .otherwise(pl.col("raw_close").shift(1).over("symbol"))  # 正常: 使用原始昨收
+        .then(pl.col("close").shift(1).over("symbol") / _adj_today)  # 除权: 除权参考价
+        .otherwise(pl.col("raw_close").shift(1).over("symbol"))      # 正常: 原始昨收
         .alias("_prev_raw_close")
     )
 
@@ -1394,18 +1409,13 @@ _BATCH_TARGET_ROWS = 150_000          # 小内存单批目标行数 (宽表 ~60-
 _BATCH_MIN_SYMBOLS = 50
 _MERGE_DATE_CHUNKS = 15               # 最终合并按日期切 15 块流式执行
 
-_ram_bytes_cache: int | None | bool = False  # False = 未探测
-
 
 def _total_ram_bytes() -> int | None:
-    global _ram_bytes_cache
-    if _ram_bytes_cache is False:
-        try:
-            import psutil
-            _ram_bytes_cache = psutil.virtual_memory().total
-        except Exception:
-            _ram_bytes_cache = None
-    return _ram_bytes_cache  # type: ignore[return-value]
+    try:
+        from app.services.memory_budget import memory_budget
+        return memory_budget().total_bytes
+    except Exception:
+        return None
 
 
 def _adaptive_sym_batch(default_batch: int, rows_per_symbol: int) -> int:
@@ -1516,10 +1526,107 @@ def _compute_storage_batches(
     return pl.concat(parts, how="diagonal_relaxed", rechunk=False)
 
 
+def recompute_daily_symbols(
+    repo, asset_type: str, *, start: date, symbols: list[str] | None,
+    on_batch_done: Callable[[int, int], None] | None = None,
+) -> int:
+    """修补后按股票重算: 输入使用完整本地原始历史, 只发布 start 起的受影响行。
+
+    复用正式的复权、历史股本、停牌及连板计算, 不用已有 enriched 作原始价格前缀。
+    均线/MACD 等宽指标由现有读取链按新版本重新计算。
+    """
+    from app.services import daily_health, data_integrity, preferences
+    from app.tickflow.repository import daily_dirname, enriched_dirname
+
+    root = Path(repo.store.data_dir)
+    files = repo.daily_repair_files(asset_type)
+    if not files:
+        raise ValueError("没有可用于重算的原始日K")
+    raw_scan = scan_daily_parquet(files, cast_options=pl.ScanCastOptions(integer_cast="allow-float"))
+    selected = sorted(set(symbols)) if symbols is not None else raw_scan.select("symbol").unique().collect()["symbol"].to_list()
+    if not selected:
+        raise ValueError("没有可用于重算的股票")
+    factors = _load_factors(root / ("adj_factor_etf" if asset_type == "etf" else "adj_factor") / "all.parquet") if asset_type != "index" else pl.DataFrame()
+    instruments = repo.get_instruments_asset("stock") if asset_type == "stock" else pl.DataFrame()
+    shares = load_share_history(root) if asset_type == "stock" else pl.DataFrame()
+    batch_size = max(1, min(preferences.get_enriched_batch_size(), 200))
+    publication = EnrichedPublication(root, asset_type, recover=True,
+                                     claim_wait_s=_PUBLICATION_CLAIM_WAIT_S, purpose="daily_repair")
+    written = 0
+    total = (len(selected) + batch_size - 1) // batch_size
+    try:
+        for offset in range(0, len(selected), batch_size):
+            batch = selected[offset:offset + batch_size]
+            raw = raw_scan.filter(pl.col("symbol").is_in(batch)).sort(["symbol", "date"]).collect(engine="streaming")
+            bad = data_integrity.invalid_daily_rows(raw)
+            if not bad.is_empty():
+                issues = data_integrity.inspect_invalid_history(root, daily_dirname(asset_type), files, bad)
+                daily_health.record_issues(root, issues)
+                if issues:
+                    first = issues[0]
+                    codes = "、".join(first.symbols[:5]) or "无法定位具体标的"
+                    raise ValueError(
+                        f"{daily_health.ASSET_LABELS[asset_type]}在 {first.day} 的原始历史日K仍异常"
+                        f"（{codes}：{first.reason}）, 未发布指标。"
+                        "已加入自检报告，请到 数据→自检/修补 处理后重试"
+                    )
+                raise ValueError("原始日K未通过校验或在检查期间发生变化，请重新自检或完成当日日K同步后重试，未发布指标")
+            enriched = compute_enriched(
+                raw,
+                factors=factors.filter(pl.col("symbol").is_in(batch)) if not factors.is_empty() else factors,
+                instruments=instruments.filter(pl.col("symbol").is_in(batch)) if not instruments.is_empty() else instruments,
+                historical_shares=shares.filter(pl.col("symbol").is_in(batch)) if not shares.is_empty() else shares,
+            )
+            output = _select_storage_cols(enriched.filter(pl.col("date") >= start))
+            written += repo.replace_enriched_rows(asset_type, output, start=start, symbols=batch, publication=publication)
+            publication.heartbeat()
+            if on_batch_done:
+                on_batch_done(offset // batch_size + 1, total)
+        publication.commit()
+    except BaseException:
+        publication.abandon()
+        raise
+    table = enriched_dirname(asset_type)
+    repo.refresh_view("kline_enriched" if asset_type == "stock" else table, str(root / table / "**/*.parquet"))
+    repo.invalidate_enriched_asset(asset_type)
+    return written
+
+
 def run_pipeline(data_dir: Path | None = None,
                  symbols: list[str] | None = None,
                  new_dates_only: bool = False,
                  on_batch_done: Callable[[int, int], None] | None = None) -> int:
+    """运行盘后管道; 异常中断时释放尚未写入的发布认领。
+
+    真正实现见 _run_pipeline_impl。包装层单独存在, 是为了保证任何异常都
+    能结束发布会话: 计算/校验阶段失败时磁盘没有新数据, abandon 直接把标记
+    恢复 ready; 已写入部分分区时保持 fail-closed, 由心跳超时后的读取方接管。
+    没有这层收尾时, 一次异常就会把 publishing 标记永久留在磁盘上, 之后所有
+    读写持续失败, 且停止实时行情 (运行期唯一频繁的写入方) 也无法自愈。
+    """
+    d = Path(data_dir or settings.data_dir)
+    publication = EnrichedPublication(
+        d, "stock", recover=True, claim_wait_s=_PUBLICATION_CLAIM_WAIT_S,
+    )
+    try:
+        return _run_pipeline_impl(
+            data_dir=data_dir,
+            symbols=symbols,
+            new_dates_only=new_dates_only,
+            on_batch_done=on_batch_done,
+            publication=publication,
+        )
+    except BaseException:
+        publication.abandon()
+        raise
+
+
+def _run_pipeline_impl(data_dir: Path | None = None,
+                       symbols: list[str] | None = None,
+                       new_dates_only: bool = False,
+                       on_batch_done: Callable[[int, int], None] | None = None,
+                       *,
+                       publication: EnrichedPublication) -> int:
     """运行盘后管道:读 kline_daily + adj_factor → 前复权 + 计算存储列 → 写 enriched。
 
     enriched 表仅存储 14 列基础行情窄表 (OHLCV + raw_close/high/low + turnover_rate + 连板数)。
@@ -1546,7 +1653,6 @@ def run_pipeline(data_dir: Path | None = None,
         logger.warning("检测到未完成的 enriched 发布,改为全量重建")
         symbols = None
         new_dates_only = False
-    publication = EnrichedPublication(d, "stock", recover=True)
     daily_dir = d / "kline_daily"
     enriched_base = d / "kline_daily_enriched"
     factor_path = d / "adj_factor" / "all.parquet"
@@ -1589,6 +1695,8 @@ def run_pipeline(data_dir: Path | None = None,
 
         # 2. 为新日期计算 enriched (所有标的)
         if new_date_dirs:
+            # 计算阶段可能持续数分钟且不写分区, 先续一次心跳再开始。
+            publication.heartbeat()
             raw_new = scan_daily_parquet(new_date_dirs[0] / "*.parquet", cast_options=_cast)
             for nd in new_date_dirs[1:]:
                 raw_new = pl.concat([raw_new, scan_daily_parquet(nd / "*.parquet", cast_options=_cast)], how="diagonal_relaxed")
@@ -1672,7 +1780,6 @@ def run_pipeline(data_dir: Path | None = None,
                     publication.write_parquet(date_df_storage, out)
                     written += date_df.height
                 logger.info("除权重算: %d 只, 共写入 %d 行", len(sym_set), written)
-
         publication.commit()
         t_done = _t.perf_counter()
         logger.info("增量管道完成: %.2fs, %d 行", t_done - t0, written)
@@ -1805,8 +1912,17 @@ def run_pipeline(data_dir: Path | None = None,
             if on_batch_done:
                 on_batch_done(batch_start // SYM_BATCH + 1, total_batches)
 
+            # 续期发布心跳: 计算阶段可能长时间不写分区, 不续期会被别的进程
+            # 判为心跳超时并接管, 导致两个写入方同时改 enriched。
+            publication.heartbeat()
+
         # 全量模式: 日期覆盖校验 → 按日期分块流式合并 → 逐分区原子替换
         if not symbols and staging_files:
+            daily_dates = {
+                p.name.removeprefix("date=")
+                for p in daily_dir.glob("date=*")
+                if p.is_dir()
+            }
             existing_dates = {
                 p.name.removeprefix("date=")
                 for p in base.glob("date=*")
@@ -1820,7 +1936,19 @@ def run_pipeline(data_dir: Path | None = None,
                 ds.isoformat() if hasattr(ds, "isoformat") else str(ds)
                 for ds in unique_dates
             }
-            missing_dates = existing_dates - rebuilt_dates
+            # 孤儿分区 = enriched 有而日K已无 (清空日K重拉/手动删目录等历史操作残留):
+            # 重建以日K为源, 永远不可能覆盖它们; 若仍按「必须覆盖全部分区」校验,
+            # 「发布被中断 → 强制全量重建」会与孤儿分区互相锁死, 同步永久失败。
+            # 合并落盘只重写重建范围内的分区、不删旧目录, 孤儿保留原地 — 告警放行,
+            # 覆盖校验只针对日K中仍存在的日期 (防重建读漏日K的真实保护场景不变)。
+            orphan_dates = existing_dates - daily_dates
+            if orphan_dates:
+                sample = ", ".join(sorted(orphan_dates)[:5])
+                logger.warning(
+                    "enriched 存在 %d 个日K已不存在的孤儿分区(保留不动): %s",
+                    len(orphan_dates), sample,
+                )
+            missing_dates = (existing_dates & daily_dates) - rebuilt_dates
             if missing_dates:
                 sample = ", ".join(sorted(missing_dates)[:5])
                 raise RuntimeError(f"全量重建结果缺少已有日期分区,拒绝覆盖: {sample}")

@@ -15,6 +15,8 @@
 """
 from __future__ import annotations
 
+import errno
+import html
 import logging
 import os
 import socket
@@ -22,13 +24,41 @@ import sys
 import threading
 import time
 import traceback
-from pathlib import Path
+from typing import BinaryIO
 
 logger = logging.getLogger(__name__)
 
 _APP_NAME = "TSP"
 _BASE_PORT = 3018
 _PORT_PROBE_RANGE = 50  # 从 3018 起最多试 50 个端口
+_instance_lock: BinaryIO | None = None
+
+
+def _failed_html(reason: str | None = None) -> str:
+    """启动失败/超时的整页提示 (后端没起来时窗口也要能说明白)。
+
+    reason=None → 沿用「启动超时」原文案; 传 reason → 换成具体失败原因,
+    文案里的换行按 <br> 渲染, 用户照指引操作即可自助解决。
+    """
+    if reason is None:
+        title = "TSP 启动超时"
+        body = "<p>后端未在预期时间内就绪，请关闭窗口后重新打开。</p>"
+    else:
+        title = "TSP 启动失败"
+        body = f"<p>{html.escape(reason).replace(chr(10), '<br>')}</p>"
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<style>
+  html,body{{margin:0;height:100%;background:#0d1117;color:#c9d1d9;
+    font-family:"Microsoft YaHei",system-ui,sans-serif;
+    display:flex;align-items:center;justify-content:center}}
+  .box{{text-align:center;max-width:460px}}
+  h1{{font-size:18px;font-weight:500;margin:0 0 12px;color:#f85149}}
+  p{{font-size:13px;color:#8b949e;margin:0 0 6px;line-height:1.7}}
+</style></head><body><div class="box">
+  <h1>{title}</h1>
+  {body}
+  <p>反复失败时查看日志：data\\logs\\desktop.log</p>
+</div></body></html>"""
 
 
 def _ensure_data_dir_writable() -> None:
@@ -50,41 +80,85 @@ def _ensure_data_dir_writable() -> None:
         raise
 
 
+def _precheck_mining_lock() -> str | None:
+    """启动前预检挖掘锁。返回 None = 无冲突; 返回 str = 冲突原因 (仅日志)。
+
+    app.main 的 lifespan 会抢 data_dir/.mining_process_lock; 被别的后端
+    实例 (panel 模式、隧道后端或残留进程) 占住时, 现在 lifespan 只降级
+    (挖掘入口 409, 面板可用, 挖掘页提供强制释放), 这里提前留一条日志
+    方便排查。试抢成功立即释放, 真正的持有仍由 lifespan 负责。
+    """
+    from app.config import settings
+    from app.services.mining_process_lock import (
+        MiningProcessLock,
+        MiningProcessLockError,
+    )
+
+    lock = MiningProcessLock(settings.data_dir)
+    try:
+        lock.acquire()
+    except MiningProcessLockError:
+        return (
+            "检测到另一个后端实例正在占用数据目录\n"
+            "(panel 模式、云隧道或残留进程)\n"
+            "请先停止它再打开桌面版：\n"
+            "1. 在任务管理器结束残留的 python / uvicorn 进程\n"
+            "2. 或重启电脑\n"
+            "完成后重新打开本应用"
+        )
+    lock.release()
+    return None
+
+
 def _acquire_single_instance() -> bool:
     """单实例锁。已运行返回 False (本进程应退出), 否则 True。
 
-    用 data_dir/.desktop.lock 文件锁实现。跨进程, 文件存在即视为已运行
-    (简单可靠; 不引入 msvcrt/fcntl 平台差异)。
+    文件内容仅供诊断, 实际以系统文件锁为准。进程崩溃后系统会自动释放,
+    避免残留 PID 被其他进程复用时永远误判为「已运行」。
     """
     from app.config import settings
 
+    global _instance_lock
+    if _instance_lock is not None:
+        return False
+
     lock_path = settings.data_dir / ".desktop.lock"
-    if lock_path.exists():
-        # 软检测: 写入进程 PID, 若该 PID 已不存在则视为残留锁, 允许接管
+    stream = lock_path.open("a+b")
+    try:
+        os.set_inheritable(stream.fileno(), False)
         try:
-            pid_str = lock_path.read_text(encoding="utf-8").strip()
-            pid = int(pid_str) if pid_str.isdigit() else None
-        except Exception:  # noqa: BLE001
-            pid = None
+            if os.name == "nt":
+                import msvcrt
 
-        if pid is not None and _pid_alive(pid):
-            logger.warning("检测到已有实例运行 (PID %d), 本进程退出", pid)
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                raise
+            logger.warning("检测到已有桌面实例持锁, 本进程退出")
             return False
-        # 残留锁: 清理后继续
-        logger.info("清理残留单实例锁 (PID %s 已不存在)", pid)
 
-    lock_path.write_text(str(_current_pid()), encoding="utf-8")
-    return True
+        stream.seek(0)
+        stream.truncate()
+        stream.write(str(_current_pid()).encode("ascii"))
+        stream.flush()
+        _instance_lock = stream
+        return True
+    finally:
+        if _instance_lock is not stream:
+            stream.close()
 
 
 def _release_single_instance() -> None:
-    from app.config import settings
-
-    lock_path = settings.data_dir / ".desktop.lock"
-    try:
-        lock_path.unlink(missing_ok=True)
-    except Exception:  # noqa: BLE001
-        pass
+    global _instance_lock
+    stream, _instance_lock = _instance_lock, None
+    if stream is not None:
+        # 不 unlink: 删除再重建会让并发启动的进程锁住不同文件, 同时通过检查。
+        stream.close()
 
 
 def _guard_streams() -> None:
@@ -119,34 +193,17 @@ def _guard_streams() -> None:
 
 
 def _setup_logging() -> None:
-    """配置日志落盘到 data/desktop.log。
+    """配置日志落盘到 data/logs/desktop.log (10MB×5 切割)。
 
     背景: spec 里 console=False (桌面应用不弹黑窗), 导致 logging 默认输出的
     stderr 被吞掉 —— 启动期任何异常用户都看不到, 表现为「双击一闪退出、查无日志」。
-    这里追加一个 FileHandler, 让日志同时落到 data_dir/desktop.log, 事后可查。
-
-    时序注意: data_dir 在 import app.config 时路径已可用, 但目录此刻可能不存在
-    (frozen 首次运行), 必须先 mkdir, 否则 FileHandler 打开文件会抛 FileNotFoundError。
-    不用第二次 basicConfig (它「首次调用才生效」), 改用 addHandler 追加。
+    这里经共享的 attach_rotating_log 追加轮转文件 handler, 事后可查; 桌面版
+    长期挂机, 不切割的追加日志会无限增长 (用户反馈的磁盘隐患)。
+    旧版的 data/desktop.log 由 attach_rotating_log 一次性迁入 data/logs/。
     """
-    try:
-        from app.config import settings
+    from app.logfile import attach_rotating_log
 
-        log_dir = settings.data_dir
-        log_dir.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(
-            log_dir / "desktop.log",
-            mode="a",            # 追加, 保留历史 (排查时往往需要对比多次启动)
-            encoding="utf-8",
-            errors="replace",    # 容错: 对齐 __init__.py 的 stderr 重配, 避免中文/emoji 触发 UnicodeEncodeError
-        )
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-        )
-        logging.getLogger().addHandler(handler)
-    except Exception as e:  # noqa: BLE001
-        # 日志落盘失败不阻断启动 (开发模式 data_dir 可能不可写)
-        logger.warning("日志文件初始化失败, 仅输出到 stderr: %s", e)
+    attach_rotating_log("desktop.log", max_mb=10, backup_count=5)
 
 
 def _show_crash(title: str, text: str) -> None:
@@ -241,6 +298,11 @@ def _run_uvmicorn(port: int, ready_event: threading.Event) -> None:
         log_level="info",
         access_log=False,    # 桌面版不需要访问日志
         loop="auto",
+        # log_config=None: uvicorn 默认给 uvicorn.* 挂独立 console handler 且
+        # propagate=False, windowed 模式下 stderr 已被守护替换, lifespan 启动
+        # 失败的 "Application startup failed" 永远到不了 desktop.log (失败页
+        # 承诺的排查入口)。置 None 让 uvicorn 日志走 root 的 FileHandler 落盘。
+        log_config=None,
     )
     server = uvicorn.Server(config)
 
@@ -260,10 +322,16 @@ def _run_uvmicorn(port: int, ready_event: threading.Event) -> None:
         ready_event.set()
 
 
-def _wait_for_server(port: int, timeout: float = 60.0) -> bool:
+def _wait_for_server(
+    port: int, timeout: float = 60.0, done_event: threading.Event | None = None
+) -> bool:
     """轮询 health 接口直到后端就绪或超时。
 
     比 monkey-patch uvicorn 内部方法更健壮, 不依赖版本内部实现。
+
+    done_event 置位表示后端线程已退出 (lifespan 失败被 uvicorn 吞掉时不向
+    调用方抛异常, 只表现为 server.run() 正常返回) —— 此时不可能出现就绪,
+    立即返回 False, 不再傻等满 timeout 把「启动失败」伪装成「超时」。
     """
     import urllib.request
     import urllib.error
@@ -271,6 +339,8 @@ def _wait_for_server(port: int, timeout: float = 60.0) -> bool:
     url = f"http://127.0.0.1:{port}/health"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        if done_event is not None and done_event.is_set():
+            return False
         try:
             with urllib.request.urlopen(url, timeout=2) as r:
                 if r.status == 200:
@@ -285,6 +355,14 @@ def _open_window(url: str) -> None:
     """主线程: 用 pywebview 打开桌面窗口。"""
     import webview  # type: ignore[import-not-found]
 
+    from app.config import settings
+
+    # 默认隐私模式会在退出后丢弃 localStorage；用户目录中的固定 profile 才能跨重启保留。
+    storage_path = settings.data_dir / "webview"
+    storage_path.mkdir(parents=True, exist_ok=True)
+    # pywebview 5.0 起默认取消所有文件下载 (Edge WebView2 / WKWebView 一致):
+    # 配置备份导出、回测 CSV 等 <a download> 直链会点击无反应, 必须在 start() 前显式开启。
+    webview.settings["ALLOW_DOWNLOADS"] = True
     window = webview.create_window(
         _APP_NAME,
         url,
@@ -294,8 +372,27 @@ def _open_window(url: str) -> None:
         # 桌面版固定单窗口, 禁用外部浏览器跳转
         confirm_close=False,
     )
-    # pywebview 会阻塞主线程直到窗口关闭
-    webview.start(debug=False)
+    # 继承隐藏启动标志时首次显示可能被抑制, GUI 就绪后再显式显示 (同失败页)。
+    webview.start(
+        lambda: window.show(), debug=False,
+        private_mode=False, storage_path=str(storage_path),
+    )
+
+
+def _open_static_window(html_text: str) -> None:
+    """只弹一个静态内容窗口 (预检失败等场景: 后端根本没起, 无需等待切换)。"""
+    import webview  # type: ignore[import-not-found]
+
+    window = webview.create_window(
+        _APP_NAME,
+        html=html_text,
+        width=560,
+        height=360,
+        confirm_close=False,
+    )
+    # 启动器以 SW_HIDE 隐藏控制台, Windows 会把隐藏标志传给进程第一个窗口
+    # (即本窗口), 故 GUI 循环就绪后显式 show (同 _open_window 的就绪处理)
+    webview.start(lambda: window.show(), debug=False)
 
 
 def main() -> int:
@@ -318,17 +415,19 @@ def main() -> int:
 
         return run_worker()
 
+    instance_acquired = False
     try:
         _ensure_data_dir_writable()
-    except Exception:
-        # 数据目录不可写是致命错误, 无法继续
-        return 1
 
-    # 单实例: 已运行则退出
-    if not _acquire_single_instance():
-        return 0
+        if not _acquire_single_instance():
+            return 0
+        instance_acquired = True
 
-    try:
+        # 撞挖掘锁只降级, 其他预检异常必须同样落盘、弹框并释放桌面锁。
+        conflict = _precheck_mining_lock()
+        if conflict is not None:
+            logger.warning("启动预检: %s", conflict.replace("\n", " "))
+
         port = _find_free_port(_BASE_PORT)
         logger.info("桌面版后端将监听 127.0.0.1:%d", port)
 
@@ -340,10 +439,22 @@ def main() -> int:
         )
         server_thread.start()
 
-        # 轮询 health 接口等后端就绪 (含 lifespan 初始化, 最多 60s)
-        if not _wait_for_server(port, timeout=60.0):
-            logger.error("后端启动超时, 桌面版退出")
-            _release_single_instance()
+        # 轮询 health 接口等后端就绪 (含 lifespan 初始化, 最多 60s);
+        # ready 由后端线程 finally 置位 → 线程已退出时立刻返回, 不等满超时
+        if not _wait_for_server(port, timeout=60.0, done_event=ready):
+            reason = (
+                "后端进程已提前退出，详情见 data\\logs\\desktop.log"
+                if ready.is_set() else None
+            )
+            logger.error("后端未就绪 (reason=%s), 桌面版退出", reason)
+            if not ready.is_set():
+                frame = sys._current_frames().get(server_thread.ident)
+                if frame is not None:
+                    logger.error(
+                        "启动超时，后端线程调用栈:\n%s",
+                        "".join(traceback.format_stack(frame)),
+                    )
+            _open_static_window(_failed_html(reason))
             return 1
 
         url = f"http://127.0.0.1:{port}"
@@ -363,7 +474,8 @@ def main() -> int:
         _show_crash("TSP 启动失败", traceback.format_exc())
         return 1
     finally:
-        _release_single_instance()
+        if instance_acquired:
+            _release_single_instance()
 
 
 if __name__ == "__main__":

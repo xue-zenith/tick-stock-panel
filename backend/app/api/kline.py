@@ -7,7 +7,6 @@ import logging
 import math
 from datetime import date, timedelta
 from functools import lru_cache
-from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -28,6 +27,34 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/kline", tags=["kline"])
 
+# 批量端点 (daily-batch / minute-batch) 单次 symbols 上限: 千只级自选整表直发
+# 会在服务端构造百万行级的 Python dict 峰值 (内存暴涨主因之一)。上限值是可配置
+# 偏好 (见 services/preferences.py), 前端分块大小读同一配置 —— 不再各处硬编码,
+# 避免「后端调小、前端仍按旧值分块」导致的全站 400。
+# 兜底留给旧客户端/异常调用: 超限明确报错, 文案回传当前值便于客户端自愈。
+def _batch_symbols_limit(key: str) -> int:
+    from app.services import preferences
+
+    return (
+        preferences.get_daily_batch_symbols()
+        if key == "daily"
+        else preferences.get_minute_batch_symbols()
+    )
+
+
+def _reject_over_limit(symbols: list, kind: str) -> None:
+    limit = _batch_symbols_limit(kind)
+    if len(symbols) <= limit:
+        return
+    label = "日K" if kind == "daily" else "分时"
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"{label}批量单次上限 {limit} 只 (当前 {len(symbols)} 只), 请分批请求; "
+            f"可在 系统设置 → 批量请求 调整上限"
+        ),
+    )
+
 
 def _json_safe(obj):
     """把 nan/inf 换成 None, 保证 JSON 合法。
@@ -44,6 +71,27 @@ def _json_safe(obj):
     return obj
 
 
+def _compress_on(pref_key: str) -> bool:
+    """读取传输压缩偏好; 未知键/读取异常一律按关闭。"""
+    from app.services import preferences as _prefs
+    _getters = {
+        "minute_batch_compress": _prefs.get_minute_batch_compress,
+        "daily_batch_compress": _prefs.get_daily_batch_compress,
+    }
+    getter = _getters.get(pref_key)
+    if getter is None:
+        return False
+    try:
+        return bool(getter())
+    except Exception:  # 偏好读取异常按不压缩返回原样
+        return False
+
+
+def _client_accepts_gzip(request: Request) -> bool:
+    headers = getattr(request, "headers", None) or {}
+    return "gzip" in (headers.get("accept-encoding") or "")
+
+
 def _gzip_payload(request: Request, payload: dict, *, pref_key: str) -> dict | Response:
     """大 JSON 响应的传输压缩: 偏好开启 + 客户端接受 gzip + 响应超阈值才压。
 
@@ -52,45 +100,77 @@ def _gzip_payload(request: Request, payload: dict, *, pref_key: str) -> dict | R
     datetime → isoformat, 与 FastAPI jsonable_encoder 输出一致
     (前端 since 增量按字符串字典序比较, 格式必须与非压缩路径相同)。
     """
-    from app.services import preferences as _prefs
-    _getters = {
-        "minute_batch_compress": _prefs.get_minute_batch_compress,
-        "daily_batch_compress": _prefs.get_daily_batch_compress,
-    }
-    getter = _getters.get(pref_key)
-    compress_on = False
-    if getter is not None:
+    if _compress_on(pref_key) and _client_accepts_gzip(request):
+        # NaN/inf 只在停牌/坏源时出现, 常态直接序列化, 仅在 allow_nan=False
+        # 抛 ValueError 时才回退 _json_safe 整树深拷贝 —— 深拷贝是批量响应
+        # 峰值最大的一份瞬态分配 (与原 payload 同量级), 常态跳过后峰值约减半。
+        def _dump(obj):
+            return json.dumps(
+                obj, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+                default=lambda o: o.isoformat() if hasattr(o, "isoformat") else str(o),
+            ).encode()
+
         try:
-            compress_on = bool(getter())
-        except Exception:  # 偏好读取异常按不压缩返回原样
-            compress_on = False
-    payload = _json_safe(payload)
-    headers = getattr(request, "headers", None) or {}
-    if compress_on and "gzip" in (headers.get("accept-encoding") or ""):
-        raw = json.dumps(
-            payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
-            default=lambda o: o.isoformat() if hasattr(o, "isoformat") else str(o),
-        ).encode()
+            raw = _dump(payload)
+        except ValueError:
+            payload = _json_safe(payload)
+            raw = _dump(payload)
         if len(raw) > 1024:
             return Response(
                 content=gzip.compress(raw, 6),
                 media_type="application/json",
                 headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
             )
-    return payload
+        # 未达压缩阈值: dumps 成功则 payload 必无非有限浮点, 回退分支则已净化
+        return payload
+    return _json_safe(payload)
+
+
+def _gzip_raw(request: Request, raw: bytes, *, pref_key: str) -> Response:
+    """已序列化 JSON bytes 的传输压缩: 规则与 _gzip_payload 一致 (偏好/阈值/level)。"""
+    if _compress_on(pref_key) and _client_accepts_gzip(request) and len(raw) > 1024:
+        return Response(
+            content=gzip.compress(raw, 6),
+            media_type="application/json",
+            headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
+        )
+    return Response(content=raw, media_type="application/json")
+
+
+def _batch_frames_json(parts, dt_col: str, dt_fmt: str, extra=None) -> bytes:
+    """批量 K 响应直出 JSON: 每只 symbol 的帧由 Polars Rust 侧序列化为行式片段。
+
+    与 to_dicts()+json.dumps 输出字节级等价 (tests/test_kline_batch_frames_json 锁定),
+    但完全不构建 Python dict —— 对象图与序列化耗时一起消失 (实测 96k 根:
+    1222ms / 峰值 69MB → 26ms / 峰值 18MB)。列集合与顺序沿用各帧自身 (含 symbol 列),
+    与 to_dicts 的键序完全一致。
+    datetime/date 列由 strftime 预格式化: write_json 原生输出空格分隔, 而前端
+    since 增量按 ISO (T 分隔) 字符串字典序比较, 格式必须与既有响应一致。
+    NaN/inf → null 为 write_json 原生行为, 与 _json_safe 净化语义一致。
+    """
+    import polars as pl
+
+    frags = [
+        json.dumps(sym) + ":" + sub.with_columns(pl.col(dt_col).dt.strftime(dt_fmt)).write_json()
+        for sym, sub in parts.items()
+    ]
+    raw = '{"data":{' + ",".join(frags) + "}"
+    if extra:
+        # 去掉 dumps 的最外层花括号, 键值并入根对象 (与旧 dict 路径的 payload 布局一致)
+        raw += "," + json.dumps(extra, ensure_ascii=False, separators=(",", ":"))[1:-1]
+    return (raw + "}").encode()
 
 
 def _minute_allowed(capset) -> bool:
-    """是否有分钟K权限 (TickFlow Pro+ 或 custom minute 源)。"""
+    """仅当前分钟数据源确实可用时开放分钟 K 接口。"""
     from app.tickflow.capabilities import Cap
-    if capset.has(Cap.KLINE_MINUTE_BATCH):
-        return True
-    from app.services import preferences
-    provider = preferences.get_minute_data_provider()
+    provider = kline_sync._selected_minute_provider_name()
+    if provider == "tickflow":
+        return capset.has(Cap.KLINE_MINUTE_BATCH)
     _, fallback, error = kline_sync._resolve_minute_provider(provider)
     if error is not None:
         logger.warning("minute provider resolution failed while checking access: %s", error)
-    return not fallback
+    return error is None and not fallback
 
 
 @lru_cache(maxsize=8192)
@@ -626,11 +706,16 @@ def get_daily_batch(request: Request, body: dict):
     """批量获取多只股票最近 N 天日K (OHLCV)。
 
     用于自选列表迷你蜡烛图等场景，只返回基础列，不返回全部 enriched 指标。
+    按交易日语义取「最近 N 根」: 停牌/断档股在窗口内凑不满时向更早窗口回补,
+    跳过停牌空档取复牌前的 K, 而不是把迷你K截成只剩复牌后几根。
     """
     symbols = body.get("symbols", [])
     days = body.get("days", 12)
     if not symbols:
         return {"data": {}}
+    # 大自选整表直发会构造千只级响应 (百万行 dict 峰值); 前端已按视口/分块
+    # 收敛, 上限挡住旧客户端或异常调用的一次性全量请求 (值可配置)。
+    _reject_over_limit(symbols, "daily")
     days = max(5, min(60, days))
 
     repo = request.app.state.repo
@@ -646,47 +731,71 @@ def get_daily_batch(request: Request, body: dict):
 
     cols = ["symbol", "date", "open", "high", "low", "close", "volume"]
 
-    # 按资产类型分组: stock 走批量缓存; etf/index 逐只查独立存储 (数量少, 成本可忽略)
-    stock_symbols: list[str] = []
-    etf_symbols: list[str] = []
-    index_symbols: list[str] = []
-    for s in symbols:
-        t = repo.resolve_asset_type(s)
-        if t == "etf":
-            etf_symbols.append(s)
-        elif t == "index":
-            index_symbols.append(s)
-        else:
-            stock_symbols.append(s)
+    # 资产类型解析一次, 回补轮次复用: stock 走批量缓存; etf/index 逐只查独立存储
+    # (数量少, 成本可忽略)
+    sym_type = {s: repo.resolve_asset_type(s) for s in symbols}
 
-    frames: list[pl.DataFrame] = []
-    if stock_symbols:
-        df_stock = repo.get_daily_batch(stock_symbols, start, end, columns=cols)
-        if not df_stock.is_empty():
-            frames.append(df_stock)
-    for sym in etf_symbols:
-        sub = repo.get_etf_daily(sym, start, end, columns=cols)
-        if not sub.is_empty():
-            frames.append(sub)
-    for sym in index_symbols:
-        sub = repo.get_index_daily(sym, start, end, columns=cols)
-        if not sub.is_empty():
-            frames.append(sub)
+    def _read_range(syms: list[str], s) -> pl.DataFrame:
+        stock_syms = [x for x in syms if sym_type[x] not in ("etf", "index")]
+        frames: list[pl.DataFrame] = []
+        if stock_syms:
+            df_stock = repo.get_daily_batch(stock_syms, s, end, columns=cols)
+            if not df_stock.is_empty():
+                frames.append(df_stock)
+        for x in syms:
+            if sym_type[x] == "etf":
+                sub = repo.get_etf_daily(x, s, end, columns=cols)
+                if not sub.is_empty():
+                    frames.append(sub)
+            elif sym_type[x] == "index":
+                sub = repo.get_index_daily(x, s, end, columns=cols)
+                if not sub.is_empty():
+                    frames.append(sub)
+        if not frames:
+            return pl.DataFrame()
+        return pl.concat(frames, how="diagonal_relaxed")
 
-    if not frames:
-        return {"data": {}}
-    df = pl.concat(frames, how="diagonal_relaxed")
+    def _tail_frames(df: pl.DataFrame) -> dict[str, pl.DataFrame]:
+        # 按 symbol 分组, 每只取最近 N 条。
+        # partition_by 一次切分, 避免 N 只自选时对同一批数据做 N 次全帧过滤。
+        # 全程持有帧不转 dict: 响应由 _batch_frames_json 直出 (见其 docstring)。
+        out: dict[str, pl.DataFrame] = {}
+        if df.is_empty():
+            return out
+        for part in df.partition_by("symbol", maintain_order=True):
+            sub = part.sort("date").tail(days)
+            if not sub.is_empty():
+                out[sub["symbol"][0]] = sub
+        return out
 
-    # 按 symbol 分组, 每只取最近 N 条。
-    # partition_by 一次切分, 避免 N 只自选时对同一批数据做 N 次全帧过滤。
-    result: dict[str, list[dict]] = {}
-    for part in df.partition_by("symbol", maintain_order=True):
-        sub = part.sort("date").tail(days)
-        if not sub.is_empty():
-            result[sub["symbol"][0]] = sub.to_dicts()
+    result = _tail_frames(_read_range(list(symbols), start))
+
+    # 停牌回补: 首段窗口是「自然日×2 ≈ 交易日」启发式, 默认窗口内每个交易日都有行情;
+    # 停牌股在窗口内交易日不足, tail(days) 只封顶不回补, 迷你K会只剩复牌后几根。
+    # 只对凑不满 days 根的股票 (含整窗无数据的长期停牌股) 分轮向更早窗口重取:
+    # 第一轮 +120 自然日通常落在 repo 的 enriched 300 天内存缓存内 (近零成本),
+    # 第二轮 +480 自然日 (约回看一年) 兜更长停牌, 兜不着的极端停牌按可得分量返回。
+    backlog: set[str] = {s for s, sub in result.items() if sub.height < days}
+    backlog |= {s for s in symbols if s not in result}
+    for pad in (120, 480):
+        if not backlog:
+            break
+        wider = _tail_frames(_read_range(sorted(backlog), start - timedelta(days=pad)))
+        still: set[str] = set()
+        for sym in backlog:
+            w = wider.get(sym)
+            if w is not None and w.height:  # 宽窗读到的必然 ⊇ 窄窗行, 直接覆盖
+                result[sym] = w
+            if w is None or w.height < days:
+                still.add(sym)
+        backlog = still
 
     # 日K批量同为大响应端点 (千只自选 MB 级), 与分时各自独立压缩开关
-    return _gzip_payload(request, {"data": result}, pref_key="daily_batch_compress")
+    return _gzip_raw(
+        request,
+        _batch_frames_json(result, "date", "%Y-%m-%d"),
+        pref_key="daily_batch_compress",
+    )
 
 
 @router.post("/minute-batch")
@@ -724,13 +833,19 @@ def get_minute_batch(request: Request, body: dict):
     prefer_local = bool(body.get("prefer_local", False))
     if not symbols:
         return {"data": {}}
+    # 同 daily-batch: 前端分块/视口化后单请求远低于此, 上限只挡异常规模 (可配置)
+    _reject_over_limit(symbols, "minute")
 
     repo = request.app.state.repo
     capset = request.app.state.capabilities
 
-    # 权限守卫: 分钟K批量是 Pro+ 能力
+    # 权限守卫: 分钟K批量补拉是 Pro+ 能力; 但本地读不消耗 provider 配额 ——
+    # 全量分钟服务健康 (正持续写本地分区) 时放行, 避免"数据在盘上却 403"。
+    # is_healthy() 纯内存 O(1), 不加热路径成本。
     if not capset.has(Cap.KLINE_MINUTE_BATCH):
-        raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (kline.minute.batch)")
+        svc = getattr(request.app.state, "minute_refresh", None)
+        if svc is None or not svc.is_healthy():
+            raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (kline.minute.batch)")
 
     trade_date = date.fromisoformat(trade_date_str) if trade_date_str else cn_today()
 
@@ -804,7 +919,7 @@ def get_minute_batch(request: Request, body: dict):
         gaps = sub["datetime"].diff().dt.total_minutes().drop_nulls()
         return gaps.filter((gaps != 1) & (gaps != _LUNCH_GAP_MIN)).len() > 0
 
-    result: dict[str, list[dict]] = {}
+    result: dict[str, pl.DataFrame] = {}
     full_pull: list[str] = []          # 无数据或中间有洞 → 全天拉
     stale_last: dict[str, datetime] = {}  # 尾部落后 → symbol → 最后一根时间
     local_parts: dict[str, pl.DataFrame] = {}
@@ -816,7 +931,7 @@ def get_minute_batch(request: Request, body: dict):
         sub = local_parts.get(sym, pl.DataFrame())
         if expected == 0 or sub.height >= fresh_floor:
             if not sub.is_empty():
-                result[sym] = sub.to_dicts()
+                result[sym] = sub
             continue
         if sub.is_empty() or _has_holes(sub):
             full_pull.append(sym)
@@ -837,7 +952,7 @@ def get_minute_batch(request: Request, body: dict):
             if sym not in etf_set:
                 sub = local_parts.get(sym)
                 if sub is not None and not sub.is_empty():
-                    result[sym] = sub.to_dicts()
+                    result[sym] = sub
         stale_last = {s: t for s, t in stale_last.items() if s in etf_set}
 
     # Step 2: 补拉并落盘 (取到即写, upsert 语义; 下一轮命中本地, 请求量骤降)。
@@ -846,39 +961,24 @@ def get_minute_batch(request: Request, body: dict):
     # 按 asset_type 拆分调用 (自定义源 / TickFlow 路由均依赖 asset_type 正确传递)。
     day_start = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
     session_end = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0)
-    lim = capset.limits(Cap.KLINE_MINUTE_BATCH)
-    minute_dirs = {
-        "stock": repo.store.data_dir / "kline_minute",
-        "etf": repo.store.data_dir / "kline_etf_minute",
-    }
+    from app.tickflow.rate_limits import resolve_limit
+
+    # 与盘后同步 (kline_sync.sync_and_persist_minute) 同用 resolve_limit (×0.8 安全
+    # 系数): 此前裸 limits().rpm=60 与盘后解析出的 48 分属两个互不感知的 rpm 桶,
+    # 同一服务端池的实际合并上限是 108rpm。
+    lim = resolve_limit(capset, Cap.KLINE_MINUTE_BATCH)
     live_map: dict[str, pl.DataFrame] = {}
 
     def _pull(asset: str, sym_list: list[str], start: datetime) -> None:
         if not sym_list:
             return
         raw_basis = minute_adjust.minute_basis_is_raw(repo.store.data_dir)
-        df_live = kline_sync.sync_minute_batch(
-            sym_list,
-            start_time=start,
-            end_time=session_end,
-            batch_size=lim.batch if lim else None,
-            rpm=lim.rpm if lim else None,
-            asset_type=asset,
-            raw_basis=raw_basis,
-        )
+        from app.services.minute_shared_pull import pull
+
+        df_live = pull(repo, sym_list, asset_type=asset, start=start, end=session_end,
+                       batch_size=lim.batch, rpm=lim.rpm, raw_basis=raw_basis)
         if df_live.is_empty():
             return
-        try:
-            # 读-改-写必须持仓库写锁 (与全量分钟服务/盘后同步同一纪律, Windows 临时文件占用)。
-            # 仅在拿到真实目录时落盘: data_dir 异常 (非 Path) 时跳过, 只返回本轮数据。
-            # 落盘必须是原始口径 (raw_basis=True 时 sync 已按 adjust='none' 取回);
-            # 对外响应再统一复权投影。
-            minute_dir = minute_dirs[asset]
-            if isinstance(minute_dir, Path):
-                with repo._write_lock:
-                    kline_sync._write_minute_partition(df_live, minute_dir)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("minute-batch 补拉落盘失败 (降级为仅返回): %s", e)
         if raw_basis:
             df_live = minute_adjust.apply_minute_adjustment(
                 df_live, repo.store.data_dir, asset,
@@ -897,34 +997,46 @@ def get_minute_batch(request: Request, body: dict):
             _pull("etf", [s for s in stale_last if s in etf_set], inc_start)
 
     # 合并: 有增量/回填的 symbol = 本地 + 拉取 upsert; 仅拉到的 (missing) 直接进结果
+    # 补拉落空兜底 (truncated): 本地已有部分K但本轮补拉失败/为空 (上游断网窗口) 时,
+    # 返回本地已落盘的行 — 图冻结在最后落盘时刻, 而不是整只从结果里消失
+    # (2026-10-23 实测: 断网 40 分钟, 分时列全部退化为只剩竞价栏)。
+    # truncated 标记这些 symbol 是残缺快照, 前端可据此提示; 严格只回本地行, 不外推。
+    truncated: set[str] = set()
     for sym, sub in local_parts.items():
         live = live_map.get(sym)
         if live is not None:
             merged = (
-                pl.concat([sub, live])
+                pl.concat([sub, live], how="diagonal_relaxed")
                 .unique(subset=["symbol", "datetime"], keep="last")
                 .sort("datetime")
             )
-            result[sym] = merged.to_dicts()
+            result[sym] = merged
+        elif sym not in result and not sub.is_empty():
+            result[sym] = sub
+            truncated.add(sym)
     for sym, live in live_map.items():
         if sym not in result:
-            result[sym] = live.to_dicts()
+            result[sym] = live
 
     # since 增量过滤: 只回 >= since 的K (含动态最后一根), 无新增的 symbol 不回
     if since_dt is not None:
         result = {
-            sym: [r for r in rows if r["datetime"] >= since_dt]
-            for sym, rows in result.items()
+            sym: sub.filter(pl.col("datetime") >= since_dt)
+            for sym, sub in result.items()
         }
-        result = {sym: rows for sym, rows in result.items() if rows}
+        result = {sym: sub for sym, sub in result.items() if sub.height}
+    # since 过滤后已无行的 symbol 不再标记 truncated (标记与 data 键一致)
+    truncated &= result.keys()
 
-    return _gzip_payload(
+    extra = {
+        "full_minute_local": full_minute_healthy,
+        "incremental": since_dt is not None,
+    }
+    if truncated:
+        extra["truncated"] = sorted(truncated)
+    return _gzip_raw(
         request,
-        {
-            "data": result,
-            "full_minute_local": full_minute_healthy,
-            "incremental": since_dt is not None,
-        },
+        _batch_frames_json(result, "datetime", "%Y-%m-%dT%H:%M:%S", extra),
         pref_key="minute_batch_compress",
     )
 
@@ -1143,7 +1255,27 @@ def get_minute(
             pref_key="minute_batch_compress",
         )
 
-    # 本地不完整或无数据 → 从当前有效分钟源实时拉取
+    # 历史日期本地有数据但不完整: 优先返回已有行, 不再丢弃去问一个给不出
+    # 历史分钟的源。历史上这里把 171 根当「无数据」→ 补拉历史日期恒为空 →
+    # 前端白屏, 用户看到「同步完成却显示不出来」。
+    # 当日盘中不适用: 盘中本地落后于实时源是常态, 仍应走下方补拉 (见
+    # test_minute_lunch_break_still_pulls_when_morning_incomplete)。
+    if not df.is_empty() and trade_date != cn_today():
+        return _gzip_payload(
+            request,
+            {
+                "symbol": symbol, "name": stock_name, "stock_info": stock_info,
+                "date": str(trade_date), "rows": df.to_dicts(),
+                "source": "local_partial",
+                "expected": expected, "actual": len(df),
+                "asset_type": asset_type,
+                "price_limit": price_limit,
+                "prev_close": prev_close,
+            },
+            pref_key="minute_batch_compress",
+        )
+
+    # 本地无数据 (或当日盘中数据落后) → 从当前有效分钟源实时拉取
     live_df = kline_sync.fetch_minute_single(
         symbol, trade_date, asset_type=asset_type, capset=capset,
         raw_basis=raw_basis,
@@ -1231,8 +1363,31 @@ async def sync_minute(request: Request):
     )
 
 
-async def trigger_minute_sync(repo, capset, *, override_days=None, extend_flag=None) -> dict:
-    """触发分钟K同步/向前扩展后台任务(HTTP 端点与 AI 助手共用同一条触发路径)。"""
+@router.post("/repair_minute_gaps")
+async def repair_minute_gaps(request: Request, body: dict):
+    """定向批量补拉缺口标的, 返回现有管道任务 ID; 不承诺源窗口外的缺口可补齐。"""
+    from app.services.minute_gaps import MAX_GAP_ROWS
+
+    symbols = body.get("symbols")
+    if not isinstance(symbols, list) or not symbols:
+        raise HTTPException(status_code=400, detail="symbols 必须是非空标的列表")
+    if len(symbols) > MAX_GAP_ROWS:
+        raise HTTPException(status_code=400, detail=f"一次最多补拉 {MAX_GAP_ROWS} 只标的")
+    if any(not isinstance(symbol, str) or not symbol.strip() for symbol in symbols):
+        raise HTTPException(status_code=400, detail="标的代码必须是非空字符串")
+    symbols = list(dict.fromkeys(symbol.strip() for symbol in symbols))
+    repo = request.app.state.repo
+    if any(repo.resolve_asset_type(symbol) != "stock" for symbol in symbols):
+        raise HTTPException(status_code=400, detail="分钟缺口补拉仅支持股票, ETF 和指数请使用各自的数据入口")
+    return await trigger_minute_sync(
+        repo, request.app.state.capabilities, override_days=10, repair_symbols=symbols,
+    )
+
+
+async def trigger_minute_sync(
+    repo, capset, *, override_days=None, extend_flag=None, repair_symbols: list[str] | None = None,
+) -> dict:
+    """复用分钟同步的分块落盘、容量限制和取消机制; 缺口补拉限定标的且强制回溯。"""
     import asyncio
 
     from app.api.data import invalidate_storage_cache
@@ -1244,14 +1399,17 @@ async def trigger_minute_sync(repo, capset, *, override_days=None, extend_flag=N
         try_acquire_run_slot,
     )
     from app.services.preferences import get_minute_sync_days
-    from app.tickflow.capabilities import Cap
     from app.tickflow.pools import get_pool
 
     if not _minute_allowed(capset):
+        if repair_symbols is not None:
+            raise HTTPException(status_code=403, detail="当前分钟数据源不可用, 请先在设置中配置可用数据源")
         raise HTTPException(status_code=403, detail="需要 Pro+ 权限")
     # 分钟K全市场同步是长任务(数据量是日K的 ~240 倍),用更宽松的卡死阈值
     job_id, is_new = job_store.create(long_running=True)
     if not is_new:
+        if repair_symbols is not None:
+            raise HTTPException(status_code=409, detail="已有数据任务正在运行, 请等待完成后再批量补拉")
         return {"status": "reused", "job_id": job_id}
 
     async def task() -> None:
@@ -1264,20 +1422,23 @@ async def trigger_minute_sync(repo, capset, *, override_days=None, extend_flag=N
             job_store.progress(job_id, stage, pct, msg)
 
         try:
-            progress("sync_minute", 5, "解析标的池…")
-            # 标的池 = instruments 维表 + 自选 (单一来源, 不拉 CN_Equity_A/SW1 池)
-            universe: set[str] = set(get_pool("watchlist"))
-            inst_path = repo.store.data_dir / "instruments" / "instruments.parquet"
-            if inst_path.exists():
-                try:
-                    import polars as pl
-                    inst = pl.read_parquet(inst_path, columns=["symbol"])
-                    universe.update(inst["symbol"].to_list())
-                except Exception:  # noqa: BLE001
-                    pass
-            # 剔除指数 symbol: 指数分钟K无本地存储, 落库会污染 kline_minute
-            index_set = repo.get_index_symbol_set()
-            universe = sorted({s for s in universe if s not in index_set})
+            progress("sync_minute", 5, "准备补拉缺口标的…" if repair_symbols is not None else "解析标的池…")
+            if repair_symbols is not None:
+                universe = repair_symbols
+            else:
+                # 标的池 = instruments 维表 + 自选 (单一来源, 不拉 CN_Equity_A/SW1 池)
+                all_symbols = set(get_pool("watchlist"))
+                inst_path = repo.store.data_dir / "instruments" / "instruments.parquet"
+                if inst_path.exists():
+                    try:
+                        import polars as pl
+                        inst = pl.read_parquet(inst_path, columns=["symbol"])
+                        all_symbols.update(inst["symbol"].to_list())
+                    except Exception:  # noqa: BLE001
+                        pass
+                # 剔除指数 symbol: 指数分钟K无本地存储, 落库会污染 kline_minute
+                index_set = repo.get_index_symbol_set()
+                universe = sorted(s for s in all_symbols if s not in index_set)
             progress("sync_minute", 10, f"标的池 {len(universe)} 只")
 
             days = override_days if override_days else get_minute_sync_days()
@@ -1287,22 +1448,37 @@ async def trigger_minute_sync(repo, capset, *, override_days=None, extend_flag=N
             def _on_chunk(done: int, total: int, seg_label: str) -> None:
                 # 进度映射: 10% (标的池解析完) → 95%, 留 5% 给写入+刷新
                 pct = 10 + int((done / max(total, 1)) * 85)
-                progress("sync_minute", pct, f"拉取分钟K… {done}/{total} 批 [{seg_label}]")
+                action = "补拉缺口分钟K" if repair_symbols is not None else "拉取分钟K"
+                progress("sync_minute", pct, f"{action}… {done}/{total} 批 [{seg_label}]")
 
             def _run():
-                return kline_sync.sync_and_persist_minute(
-                    universe, repo, capset, days=days,
-                    extend_backward=extend_backward,
-                    on_chunk_done=_on_chunk,
-                )
+                from app.jobs.daily_pipeline import _refresh_single_view
+
+                try:
+                    if repair_symbols is not None:
+                        progress("sync_minute", 10, f"补拉 {len(universe)} 只缺口标的的分钟K…")
+                    return kline_sync.sync_and_persist_minute(
+                        universe, repo, capset, days=days,
+                        extend_backward=extend_backward,
+                        force_full_days=repair_symbols is not None,
+                        on_chunk_done=_on_chunk,
+                    )
+                finally:
+                    if repair_symbols is not None:
+                        # 补拉分块已写入的数据在失败/取消后也要可见, 刷新仍占用原执行槽。
+                        _refresh_single_view(repo, "kline_minute")
 
             written = await loop.run_in_executor(_long_task_executor, run_with_capacity, job_id, _run)
+            if repair_symbols is None:
+                from app.jobs.daily_pipeline import _refresh_single_view
 
-            # 刷新视图
-            from app.jobs.daily_pipeline import _refresh_single_view
-            _refresh_single_view(repo, "kline_minute")
+                _refresh_single_view(repo, "kline_minute")
 
-            progress("done", 100, f"分钟 K 同步完成,{written} 行")
+            message = (
+                f"缺口分钟补拉完成, 写入 {written} 行; 是否补齐以体检结果为准"
+                if repair_symbols is not None else f"分钟 K 同步完成,{written} 行"
+            )
+            progress("done", 100, message)
             job_store.succeed(job_id, {"minute_rows": written, "universe_size": len(universe)})
             invalidate_storage_cache()
         except JobCancelledError:
@@ -1364,6 +1540,33 @@ async def sync_minute_single(request: Request, body: dict):
     _refresh_single_view(repo, "kline_minute")
 
     return {"status": "ok", "symbol": symbol, "rows": written}
+
+
+@router.get("/minute-gaps")
+def get_minute_gaps(
+    request: Request,
+    symbols: str | None = Query(None, description="逗号分隔, 只看这些标的"),
+    dates: str | None = Query(None, description="逗号分隔 YYYY-MM-DD, 只看这些交易日"),
+    limit: int = Query(500, ge=1, le=2000, description="最多返回的缺口行数"),
+):
+    """分钟数据缺口体检: 列出本地分区中分钟 K 不完整的 (标的, 交易日)。
+
+    只做**发现**, 不做补齐 —— 上游分钟源通常只提供最近 N 天, 超出窗口的历史
+    缺口补不回来, 盲目补拉会白等且返回空。前端据此展示残缺清单并标注
+    「可补 / 超出源窗口」, 避免用户误以为「同步完成 = 数据完整」。
+    """
+    from app.services.minute_gaps import scan_minute_gaps
+
+    repo = request.app.state.repo
+    now = cn_now()
+    return scan_minute_gaps(
+        repo.store.data_dir / "kline_minute",
+        today=cn_today(),
+        now_hm=(now.hour, now.minute),
+        symbols=[s.strip() for s in symbols.split(",") if s.strip()] if symbols else None,
+        dates=[d.strip() for d in dates.split(",") if d.strip()] if dates else None,
+        limit=limit,
+    )
 
 
 @router.post("/minute-migrate")
@@ -1661,13 +1864,18 @@ async def rebuild_enriched(request: Request):
                 for view_name, glob in [
                     ("kline_enriched", f"{d}/kline_daily_enriched/**/*.parquet"),
                 ]:
-                    try:
-                        repo.db.execute(
-                            f"CREATE OR REPLACE VIEW {view_name} AS "
-                            f"SELECT * FROM read_parquet('{glob}', union_by_name=true)"
-                        )
-                    except Exception:
-                        pass
+                    repo.refresh_view(view_name, glob)
+
+                # 失效内存 enriched 快照: get_enriched_latest 对非空缓存不校验
+                # generation, 只刷 DuckDB 视图不重载内存缓存的话, 重建结果对
+                # 自选/筛选/监控等页面不可见, 直到进程重启 (对照 /api/data/clear
+                # 的同类修复)。clear 无条件清空 (refresh 在磁盘无数据时会提前
+                # return 留下旧缓存), refresh 重建; 在 executor 执行避免阻塞事件循环。
+                def _reload_memory_cache() -> None:
+                    repo.clear_cache()
+                    repo.refresh_cache()
+
+                await loop.run_in_executor(_long_task_executor, _reload_memory_cache)
 
                 progress("rebuild_enriched", 100, f"完成,覆盖 {enriched_days} 天")
                 job_store.succeed(job_id, {

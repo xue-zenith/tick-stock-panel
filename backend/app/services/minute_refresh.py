@@ -25,7 +25,7 @@
   由 provider 自管批量与限速 (rpm 配置/内部并发), 服务不代限。
 - 稳态轮单请求: 无脉冲并发, 间隔可低至 3s; 实际节奏 = max(间隔, 单轮完成),
   服务端响应 ~5s 时自动退化为响应节奏, 不会重叠请求。
-- 固定节奏: 默认 6s 一轮 (clamp [3, 300]), 不补跑 (missed 轮次直接跳过);
+- 固定节奏: 默认 6s 一轮 (clamp [3, 120]), 不补跑 (missed 轮次直接跳过);
   仅修复轮的自定义源下限抬到 60s (全天批量打不住 6s 节奏)。
 - 仅连续竞价时段运行 (9:30-11:30 / 13:00-15:00), 午休/收盘自动暂停与恢复;
   午休后恢复因覆盖滞后会多跑一次修复轮, 幂等无害。
@@ -50,7 +50,7 @@ from typing import Any
 import polars as pl
 
 from app.market_time import cn_now, cn_today, in_continuous_session
-from app.services import preferences
+from app.services import minute_adjust, preferences
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,8 @@ class _RefreshState:
     last_error: str | None = None
     next_round_at: float | None = None      # epoch 秒
     extra: dict[str, Any] = field(default_factory=dict)
+    minute_basis_raw: bool | None = None   # 上轮落盘时本地库是否 raw 基准
+    basis_warned: bool = False             # 混基准风险只警告一次
 
 
 class MinuteRefreshService:
@@ -150,17 +152,21 @@ class MinuteRefreshService:
             return False
 
     def active_provider(self) -> str:
-        """全量分钟生效源名 ("tickflow" 或自定义源名, 偏好 full_minute_data_provider)。"""
+        """全量分钟生效源名；失效的自定义源不得静默伪装成 TickFlow。"""
         try:
-            return preferences.get_full_minute_data_provider()
-        except Exception:  # noqa: BLE001 — 偏好文件异常按 TickFlow 处理
-            return "tickflow"
+            saved = str(preferences.load().get("full_minute_data_provider", "tickflow") or "tickflow").lower()
+            selected = preferences.get_full_minute_data_provider()
+            if saved != "tickflow" and selected == "tickflow":
+                return f"unavailable:{saved}"
+            return selected
+        except Exception:  # noqa: BLE001
+            return "unavailable:unknown"
 
     def _resolve_custom(self) -> tuple[object | None, str]:
         """解析自定义源。返回 (provider_or_None, effective_name):
 
-        - 偏好 tickflow / 源未声明 full_minute 数据集 / 解析异常 → (None, "tickflow")
-          (与 minute 数据集同纪律: 静默降级 TickFlow, 能力门控决定能否真正运行)
+        - 明确偏好 tickflow → (None, "tickflow")
+        - 自定义源失效或缺少 full_minute → (None, "unavailable:<name>")
         - 成功 → (provider, name)
         """
         from app.services import kline_sync
@@ -168,13 +174,17 @@ class MinuteRefreshService:
         name = self.active_provider()
         if name == "tickflow":
             return (None, "tickflow")
-        provider, use_tickflow, err = kline_sync._resolve_full_minute_provider(name)
-        if use_tickflow:
-            if err is not None:
-                logger.warning(
-                    "full_minute provider %s 解析失败, 本轮降级 TickFlow: %s", name, err,
-                )
-            return (None, "tickflow")
+        if name.startswith("unavailable:"):
+            logger.warning("full_minute provider %s unavailable; not falling back to TickFlow",
+                           name.removeprefix("unavailable:"))
+            return (None, name)
+        provider, _use_tickflow, err = kline_sync._resolve_full_minute_provider(name)
+        if err is not None or provider is None:
+            logger.warning(
+                "full_minute provider %s unavailable; not falling back to TickFlow: %s",
+                name, err,
+            )
+            return (None, f"unavailable:{name}")
         return (provider, name)
 
     def _custom_supports_increment(self, provider: object) -> bool:
@@ -183,7 +193,7 @@ class MinuteRefreshService:
 
     def repair_only(self) -> bool:
         """当前生效源只能全天修复轮 (无廉价增量端点) — 节奏下限抬到 60s。"""
-        provider, name = self._resolve_custom()
+        provider, _name = self._resolve_custom()
         return provider is not None and not self._custom_supports_increment(provider)
 
     def _effective_interval(self) -> int:
@@ -282,6 +292,11 @@ class MinuteRefreshService:
 
         t0 = time.perf_counter()
         custom, provider_name = self._resolve_custom()
+        if provider_name.startswith("unavailable:"):
+            self._state.last_error = f"full_minute provider unavailable: {provider_name.removeprefix('unavailable:')}"
+            self._state.last_requests = 0
+            self._state.last_symbols = 0
+            return
         mode = self._select_mode()
         if mode == "increment" and custom is not None and not self._custom_supports_increment(custom):
             # 无廉价增量端点的源: 增量轮退化为修复轮 (全天批量幂等覆盖, 数据不丢)
@@ -325,10 +340,25 @@ class MinuteRefreshService:
                 )
                 return
             self._empty_rounds = 0
+            # 基准可见性: intraday 端点的价格基准未签约 (SDK 无 adjust 参数),
+            # 本地库未迁移 raw (.raw_basis 缺失) 时服务写入与端点补拉 (forward)
+            # 可能混基准 —— 只暴露状态与一次性警告, 不阻断 (阻断属功能变更, 另行决策)。
+            basis_raw = minute_adjust.minute_basis_is_raw(self._repo.store.data_dir)
+            if not basis_raw and not self._state.basis_warned:
+                logger.warning(
+                    "全量分钟: 本地分钟库未迁移 raw 基准 (.raw_basis 缺失), intraday "
+                    "价格基准未签约, 服务写入可能与端点补拉混基准; 建议先运行分钟基准迁移"
+                )
+                self._state.basis_warned = True
+            self._state.minute_basis_raw = basis_raw
             write_started = time.perf_counter()
-            written = kline_sync._write_minute_partition(
-                df, self._repo.store.data_dir / "kline_minute",
-            )
+            # 读-改-写必须持仓库写锁 (与 minute-batch 补拉 / 盘后同步同一纪律):
+            # 无互斥的两个写者并发替换同一分区时, 后写者以过期基底覆盖丢整批行,
+            # 且会共用同一 tmp 文件交错损坏。实测增量轮落盘 ~10ms, 锁占用可忽略。
+            with self._repo._write_lock:
+                written = kline_sync._write_minute_partition(
+                    df, self._repo.store.data_dir / "kline_minute",
+                )
             write_ms = (time.perf_counter() - write_started) * 1000
 
         self._state.rounds += 1
@@ -378,10 +408,18 @@ class MinuteRefreshService:
     def status(self) -> dict[str, Any]:
         import contextlib
 
+        # 偏好/能力探测异常不让状态接口 500 — 运维排障最需要它的时刻恰是
+        # 配置坏掉时; 各字段降级为关闭/未知而不是抛错。
+        enabled = False
         with contextlib.suppress(Exception):
             enabled = preferences.get_minute_refresh_enabled()
         running = self._thread is not None and self._thread.is_alive()
-        gate = self._gate_reason()
+        gate: str | None = None
+        with contextlib.suppress(Exception):
+            gate = self._gate_reason()
+        interval_seconds = 0.0
+        with contextlib.suppress(Exception):
+            interval_seconds = preferences.get_minute_refresh_interval()
         return {
             "enabled": enabled,
             "running": running,
@@ -389,7 +427,7 @@ class MinuteRefreshService:
             "provider": self.active_provider(),
             "provider_effective": self._resolve_custom()[1],
             "repair_only": self.repair_only(),
-            "interval_seconds": preferences.get_minute_refresh_interval(),
+            "interval_seconds": interval_seconds,
             "capability_ok": self.capability_ok(),
             "in_trading_hours": _in_continuous_session(),
             "gate_reason": gate if (enabled and running) else (gate or "disabled"),
@@ -400,6 +438,7 @@ class MinuteRefreshService:
             "last_symbols": self._state.last_symbols,
             "last_requests": self._state.last_requests,
             "last_mode": self._state.last_mode,
+            "minute_basis_raw": self._state.minute_basis_raw,
             "next_round_at": self._state.next_round_at,
             "last_error": self._state.last_error,
         }
