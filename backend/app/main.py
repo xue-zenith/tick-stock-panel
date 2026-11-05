@@ -726,7 +726,16 @@ async def capability_denied_handler(request: Request, exc: CapabilityDenied) -> 
 _static = Path(settings.static_dir)
 if _static.exists():
     if (_static / "assets").exists():
+        # no-store: 防止浏览器缓存旧版 JS chunk (Vite hash 变了但旧文件
+        # 仍可能被浏览器从磁盘缓存加载, 导致前端代码版本不一致)
         app.mount("/assets", StaticFiles(directory=_static / "assets"), name="assets")
+        # Middleware: 给 /assets/ 响应加 no-store 头
+        @app.middleware("http")
+        async def _no_cache_assets(request: Request, call_next):
+            resp = await call_next(request)
+            if request.url.path.startswith("/assets/"):
+                resp.headers["Cache-Control"] = "no-store, must-revalidate"
+            return resp
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):  # noqa: ARG001

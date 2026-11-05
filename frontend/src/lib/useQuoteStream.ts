@@ -4,7 +4,6 @@ import { SSE_INVALIDATE_PREFIXES, QK } from './queryKeys'
 import { klineDailyLatestQueryOptions, mergeLatestKlineRow } from './kline'
 import { getQueryConfig } from './useQueryConfig'
 import { toast } from '@/components/Toast'
-import { pushAlertToasts } from '@/components/AlertToast'
 import { feedReviewEvent } from './reviewStore'
 import type { KlineDailyResponse, StrategyAlertEvent } from './api'
 
@@ -98,14 +97,10 @@ export function useQuoteStream(
       }
     }
 
-    // 监控告警: 用专用 AlertToast (整批只响一声, 每条都弹, 受 maxVisible 上限保护)
-    if (strategyAlerts.length > 0) {
-      // 有 onAlert 回调时走回调, 否则弹 AlertToast
-      if (onAlert) {
-        onAlert(strategyAlerts)
-      }
-      // 批量弹通知 (去掉了 slice(0,2) 截断, 让每只新命中都弹 toast; 声音整批只响一次)
-      pushAlertToasts(strategyAlerts as any)
+    // 监控告警: 弹窗已完全关闭 — 不再调 pushAlertToasts
+    // onAlert 回调保留 (供需要告警数据的页面使用), 但不弹 toast
+    if (strategyAlerts.length > 0 && onAlert) {
+      onAlert(strategyAlerts)
     }
   }, [onAlert])
 
