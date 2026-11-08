@@ -17,10 +17,11 @@ const chart = vi.hoisted(() => ({
   on: vi.fn(), off: vi.fn(), setOption: vi.fn(), resize: vi.fn(), dispose: vi.fn(),
   isDisposed: () => false, getDom: () => null, group: '',
 }))
-vi.mock('echarts', () => ({
+vi.mock('echarts/core', () => ({
   init: () => chart,
   getInstanceByDom: () => null,
   connect: vi.fn(),
+  use: vi.fn(),
 }))
 vi.mock('@/lib/theme', () => ({
   useChartTheme: () => ({

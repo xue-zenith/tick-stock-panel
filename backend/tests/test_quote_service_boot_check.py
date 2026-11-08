@@ -66,13 +66,18 @@ def test_logs_and_does_not_start_when_tier_disallows(monkeypatch, caplog):
 
 
 def test_demotes_preference_when_tier_disallows(monkeypatch):
-    """档位 none 且偏好为开 ⇒ 必须把偏好**同步写 False**(否则 UI 会误显示「已开启」)。"""
+    """档位 none 且偏好为开 ⇒ 不启动, 且**不**把偏好写 False(本机刻意行为)。
+
+    本机 8467fe27 起 boot_check 不再强制降级 preferences: 能力探测可能因网络
+    抖动/扶摇跨夜短暂不可达而暂时失败, 原逻辑写 False 后能力恢复也无法自动启动,
+    需手动改 preferences + 重启; 现在仅跳过本次启动, 下次重启能力恢复即自动启动。
+    """
     saved: list[dict] = []
     monkeypatch.setattr(preferences, "save", lambda updates: saved.append(updates))
     qs, started = _make(monkeypatch, tier_allowed=False, pref_enabled=True)
     qs.boot_check()
     assert started == [], "档位 none 时不应启动"
-    assert saved == [{"realtime_quotes_enabled": False}], f"应把偏好降级写回, 实际={saved}"
+    assert saved == [], f"本机 boot_check 不应降级写回 preferences, 实际={saved}"
 
 
 @pytest.mark.xfail(

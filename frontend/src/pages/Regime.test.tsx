@@ -12,7 +12,7 @@ const fixtures = vi.hoisted(() => ({
   resizes: [] as (() => void)[],
 }))
 
-vi.mock('echarts', () => ({
+vi.mock('echarts/core', () => ({
   init: (dom: HTMLElement) => {
     const instance = {
       dom, option: null as any, disposed: false,
@@ -28,6 +28,7 @@ vi.mock('echarts', () => ({
     fixtures.charts.push(instance)
     return instance
   },
+  use: vi.fn(),
 }))
 vi.mock('@/components/Toast', () => ({ toast: vi.fn() }))
 

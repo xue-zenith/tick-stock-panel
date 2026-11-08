@@ -1258,8 +1258,7 @@ class KlineRepository:
             if self._enriched_warming:
                 return pl.DataFrame(), None
             # 预热失败降级: 不同步重算, 返回空表
-            logger.warning("enriched 缓存为空 (预热失败降级), 返回空表")
-            return pl.DataFrame(), self._enriched_cache_date
+            self._refresh_enriched()
         if self._enriched_cache is None:
             return pl.DataFrame(), self._enriched_cache_date
         frame = self._enriched_cache
@@ -1443,11 +1442,8 @@ class KlineRepository:
             if self._enriched_warming:
                 # 后台预热中: 返回空表, 不触发同步重算 (同 get_enriched_latest 守卫)
                 return pl.DataFrame()
-            # 预热已结束但缓存仍为 None — 预热失败降级。
-            # 不在轮询/请求线程做 50s+ 同步重算; 返回空表让上层优雅降级。
-            # 后台 warmup 重试或手动 refresh_cache 会恢复缓存。
-            logger.warning("live_agg 缓存为空 (预热失败降级), 返回空表")
-            return pl.DataFrame()
+            self._refresh_enriched()
+            self._live_agg_check_date = cn_today()  # 刚建过, 当天不必再查磁盘
         else:
             today = cn_today()
             if self._live_agg_check_date != today:

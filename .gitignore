@@ -92,6 +92,8 @@ data/strategies/custom/
 backend._recheck*.py
 backend/_verify*.py
 backend/_desktop_run.log
+# 测试运行产生的 mock 数据目录 (MagicMock data_dir 属性被当作路径创建)
+backend/MagicMock/
 reports/tickflow_pro_probe/
 .cursor/debug-*.log
 
