@@ -1177,7 +1177,7 @@ function _DtTh({ label, sortKey, sort, onSort, className }: {
   )
 }
 
-function _DtStockTable({ items, tab, onOpenStock }: {
+function DtStockTable({ items, tab, onOpenStock }: {
   items: DragonTigerStockItem[]
   tab: _DtTabKey
   onOpenStock: (s: string) => void
@@ -1491,7 +1491,7 @@ export function DragonTigerCard({ date, onOpenStock }: {
               {tab === 'hot_money' ? (
                 <_DtSeatList seats={seats} onOpenStock={onOpenStock} />
               ) : (
-                <_DtStockTable
+                <DtStockTable
                   key={tab}
                   items={_dtSorted(tab === 'org' ? orgItems : allItems, tab === 'org' ? 'org_net_value' : 'net_value')}
                   tab={tab}

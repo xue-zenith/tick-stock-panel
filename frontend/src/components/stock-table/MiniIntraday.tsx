@@ -266,6 +266,9 @@ export const MiniIntraday = memo(function MiniIntraday({ rows, prevClose, change
   const W = width
   const H = height
   const padY = 3
+  // 渐变 id 唯一化(自选列表同屏多张图, 避免互相覆盖)
+  // 必须在早退分支之前调用, 保证 Hook 顺序在所有渲染路径一致。
+  const gradId = useId().replace(/:/g, '')
 
   // 盘前 (9:15–9:25) 还没有分钟K, 但竞价序列已有数据 — 此时单独渲染竞价栏,
   // 否则列表在集合竞价时段反而看不到任何东西。价格点列统一在此过滤
@@ -444,9 +447,6 @@ export const MiniIntraday = memo(function MiniIntraday({ rows, prevClose, change
 
   // 昨收参考线 y 坐标
   const prevCloseY = yScale(baseline)
-
-  // 渐变 id 唯一化(自选列表同屏多张图, 避免互相覆盖)
-  const gradId = useId().replace(/:/g, '')
 
   return (
     <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className="block">
