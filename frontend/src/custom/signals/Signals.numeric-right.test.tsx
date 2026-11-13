@@ -3,6 +3,7 @@
 // right=0.6, 后端 isinstance(int,float) 一直合法) 时, 前端 c.right.startsWith
 // 直接 TypeError, 整页渲染崩、错误边界兜底。用真实接口数据结构 + ExtensionBoundary
 // 复刻页面挂载路径, 断言边界不再触发、条件正常显示。
+import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -61,27 +62,27 @@ beforeEach(() => {
   root = createRoot(container)
 })
 
-afterEach(() => {
-  root?.unmount()
+afterEach(async () => {
+  await act(async () => root?.unmount())
   container?.remove()
 })
 
 function render(ui: React.ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  root!.render(
+  return act(async () => root!.render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={['/signals']}>{ui}</MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={['/signals']}>{ui}</MemoryRouter>
     </QueryClientProvider>,
-  )
+  ))
 }
 
 it('信号库页: 数字右值条件不再触发错误边界, 正常渲染', async () => {
-  render(
+  await render(
     <ExtensionBoundary extensionId="official.signals">
       <Signals />
     </ExtensionBoundary>,
   )
-  await new Promise(r => setTimeout(r, 120))
+  await act(async () => { await new Promise(r => setTimeout(r, 120)) })
   expect(container!.textContent).not.toContain('暂时不可用')
   expect(container!.textContent).toContain('信号库')
   // 数字右值条件正常显示 (不再因 .startsWith 崩溃)
@@ -89,14 +90,14 @@ it('信号库页: 数字右值条件不再触发错误边界, 正常渲染', asy
 })
 
 it('条件编辑器: 数字右值不抛错, 常量输入正常挂载', async () => {
-  render(
+  await render(
     <ConditionEditor
       conditions={[{ left: 'change_pct', op: '>', right: 0.6, leftDays: 0, rightDays: 0 }]}
       onChange={() => {}}
       options={fixtures.options as any}
     />,
   )
-  await new Promise(r => setTimeout(r, 50))
+  await act(async () => { await new Promise(r => setTimeout(r, 50)) })
   const input = container!.querySelector('input[type="number"]') as HTMLInputElement
   expect(input).not.toBeNull()
   expect(input.value).toBe('0.6')

@@ -17,7 +17,7 @@ from app.backtest.engine import BacktestEngine, MatcherConfig
 START = date(2024, 1, 1)
 
 
-def _day(i: int, o: float, h: float, l: float, c: float) -> dict:
+def _day(i: int, o: float, h: float, l: float, c: float) -> dict:  # noqa: E741
     return {
         "symbol": "A", "date": START + timedelta(days=i),
         "open": o, "high": h, "low": l, "close": c,

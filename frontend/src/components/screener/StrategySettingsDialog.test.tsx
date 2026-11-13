@@ -78,7 +78,7 @@ async function render(props: { onClose?: () => void; onSaved?: (limit: number | 
   root = createRoot(container)
   await act(async () => {
     root!.render(
-      <MemoryRouter>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <QueryClientProvider client={queryClient}>
           <StrategySettingsDialog strategyId="test_strategy" onClose={props.onClose ?? (() => {})} onSaved={props.onSaved} />
         </QueryClientProvider>

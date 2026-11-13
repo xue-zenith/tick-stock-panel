@@ -6,7 +6,6 @@ tests/fixtures/custom_signals/ (入库, 仅测试使用)。
 """
 from __future__ import annotations
 
-import json
 import shutil
 from pathlib import Path
 

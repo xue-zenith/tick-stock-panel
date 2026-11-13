@@ -284,10 +284,12 @@ export function useQuoteStream(
     document.addEventListener('visibilitychange', onVisibility)
     connect()
 
+    const enrichedThrottler = enrichedThrottlerRef.current
+    const strategyThrottler = strategyThrottlerRef.current
     return () => {
       clearTimeout(retryRef.current)
-      enrichedThrottlerRef.current.cancel()
-      strategyThrottlerRef.current.cancel()
+      enrichedThrottler.cancel()
+      strategyThrottler.cancel()
       document.removeEventListener('visibilitychange', onVisibility)
       if (esRef.current) {
         esRef.current.close()

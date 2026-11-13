@@ -45,7 +45,7 @@ def test_create_and_atomic_summary_reads(tmp_path: Path) -> None:
             try:
                 value = store.read_summary("run_atomic")
                 assert isinstance(value.get("iteration"), int)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 failures.append(exc)
                 return
 
@@ -241,7 +241,7 @@ def test_concurrent_event_appends_have_unique_contiguous_ids(tmp_path: Path) -> 
             barrier.wait()
             for index in range(30):
                 store.append_event("concurrent", "progress", {"worker": worker, "index": index})
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             failures.append(exc)
 
     threads = [

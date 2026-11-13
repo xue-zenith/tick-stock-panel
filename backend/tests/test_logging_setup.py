@@ -6,8 +6,8 @@ from logging.handlers import RotatingFileHandler
 
 import pytest
 
-from app.logfile import attach_rotating_log
 from app.config import settings
+from app.logfile import attach_rotating_log
 
 
 @pytest.fixture()

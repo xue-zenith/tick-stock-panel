@@ -91,8 +91,8 @@ export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
     staleTime: 5 * 60 * 1000,
   })
 
-  const dates = data?.dates ?? []
-  const columns = data?.columns ?? {}
+  const dates = useMemo(() => data?.dates ?? [], [data?.dates])
+  const columns = useMemo(() => data?.columns ?? {}, [data?.columns])
   const conceptCount = data?.concept_count ?? 0
 
   // 行数 = 最长那列的长度(理论上每天概念数应一致, 取最大兜底)

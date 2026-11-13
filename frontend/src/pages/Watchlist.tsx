@@ -854,7 +854,7 @@ export function Watchlist() {
     queryKey: QK.watchlistGroups,
     queryFn: api.watchlistGroups,
   })
-  const groups = groupList.data?.groups ?? []
+  const groups = useMemo(() => groupList.data?.groups ?? [], [groupList.data?.groups])
   const activeGroupId = selectedGroup === 'all' || selectedGroup === 'ungrouped'
     ? null
     : selectedGroup
@@ -1121,9 +1121,9 @@ export function Watchlist() {
     setGroupCardsOpen(false)
   }, [])
 
-  const listEntries = list.data?.symbols ?? []
+  const listEntries = useMemo(() => list.data?.symbols ?? [], [list.data?.symbols])
   const allSymbols = listEntries.map(s => s.symbol)
-  const rows = enriched.data?.rows ?? []
+  const rows = useMemo(() => enriched.data?.rows ?? [], [enriched.data?.rows])
   const groupBySymbol = useMemo(
     () => new Map(listEntries.map(entry => [entry.symbol, entry.group_ids ?? []])),
     [listEntries],

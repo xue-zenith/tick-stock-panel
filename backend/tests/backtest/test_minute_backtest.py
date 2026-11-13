@@ -268,7 +268,7 @@ def test_daily_window_strictly_before_trigger_day(scenario):
 
 
 def test_limit_up_entry_rejected(scenario):
-    service, panel, days, _ = scenario
+    service, _panel, days, _ = scenario
     result = service.run(_config(days["t1"], days["t3"]))
     assert not result.error, result.error
     # T2 的 600000.SH 触发分钟收盘 = 涨停价 → 拒买; T3 才有它的成交

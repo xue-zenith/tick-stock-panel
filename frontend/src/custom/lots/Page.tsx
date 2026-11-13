@@ -54,7 +54,7 @@ export function Lots() {
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const lotsQuery = useQuery({ queryKey: QK.lots, queryFn: api.lotsList })
-  const lots = lotsQuery.data?.lots ?? []
+  const lots = useMemo(() => lotsQuery.data?.lots ?? [], [lotsQuery.data?.lots])
 
   const allSymbols = useMemo(() => Array.from(new Set(lots.map(l => l.symbol))), [lots])
   const namesQuery = useQuery({
@@ -63,7 +63,7 @@ export function Lots() {
     enabled: allSymbols.length > 0,
     staleTime: 300000,
   })
-  const symbolNames = namesQuery.data?.names ?? {}
+  const symbolNames = useMemo(() => namesQuery.data?.names ?? {}, [namesQuery.data?.names])
 
   // 9999 哨兵: 未记买入日期的排最后
   const sortedLots = useMemo(() => {

@@ -83,7 +83,7 @@ def test_name_map_cache_invalidated_on_instruments_refresh(repo):
     assert repo.get_name_map(["301999.SZ"]) == {"301999.SZ": "新股股份"}
 
 
-import datetime as _dt
+import datetime as _dt  # noqa: E402
 
 
 def test_execute_one_releases_parquet_file(repo):

@@ -244,7 +244,7 @@ async def ensure_builtin_presets(data_dir: Path) -> None:
                 existing.pull = config.pull
                 changed = True
             if not (existing.description or "").strip() or \
-                    (existing.description or "").startswith(_FACTORY_DESC_PREFIXES):
+                    (existing.description or "").startswith(_FACTORY_DESC_PREFIXES):  # noqa: SIM102
                 if existing.description != config.description:
                     existing.description = config.description
                     changed = True

@@ -139,7 +139,7 @@ class _FakeOptimizer:
 
 
 # 从真实 PanelCache 取字段模板 —— 字段被重命名时本桩自动跟随, 避免 test 绿而生产 KeyError。
-from app.backtest.engine import PanelCache
+from app.backtest.engine import PanelCache  # noqa: E402
 
 _ZERO_CACHE_STATS = {k: type(v)() for k, v in PanelCache().stats().items()}
 

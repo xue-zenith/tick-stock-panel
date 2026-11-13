@@ -48,6 +48,7 @@ from app.plugins.fuyao.client import (
     HISTORICAL_BATCH_LIMIT,
     FuyaoClient,
     FuyaoError,
+    FuyaoRateLimitError,
     FuyaoUnknownSymbolError,
 )
 
@@ -62,7 +63,8 @@ SECRETS_FIELD = "fuyao_api_key"  # UI 配置的 Key 存 secrets.json, 优先级�
 # 扶摇 *ms 时间字段为北京时间零点(= UTC 前一日 16:00), +8h 后按 UTC 解析即得交易日
 _SH_MS = 28_800_000
 _HIST_MAX_SPAN_MS = 3650 * 86_400_000  # historical 单次窗口上限 10 年, 超出由本层分片
-_HIST_INTERVAL_S = 0.12  # 单标的请求节流(实测 200+ 连发未触发 4001 限频)
+_HIST_INTERVAL_S = 0.40  # 单标的额外节流;客户端还有进程级全局令牌桶
+_HIST_RATE_LIMIT_COOLDOWN_S = 5.0
 _FINANCIAL_HISTORY_PERIODS = 8  # 财务首装全量历史: 最近 8 期季报(约 2 年)
 _VALUATION_BATCH = 100  # 估值/价格快照端点单次上限 100 只
 # 项目财务表名 → 扶摇报表端点名
@@ -400,7 +402,7 @@ class FuyaoProvider:
         for f in cached:
             try:
                 dmin, _ = _dump_date_range(f)
-            except Exception:  # 缓存损坏不致命, 换下一个/重拉
+            except Exception:  # 缓存损坏不致命, 换下一个/重拉  # noqa: BLE001
                 continue
             if dmin is not None and start_d >= dmin:
                 return f
@@ -610,7 +612,7 @@ class FuyaoProvider:
         for candidate in sorted(_cache_dir().glob("daily_k__*.parquet"), reverse=True):
             try:
                 dmin, dmax = _dump_date_range(candidate)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 continue
             if dmin is not None and dmax is not None:
                 return candidate, dmin, dmax
@@ -702,6 +704,21 @@ class FuyaoProvider:
                     continue
                 try:
                     grouped = client.historical_kline_batch(batch, start, chunk_end)
+                except FuyaoRateLimitError as err:
+                    # 批量接口触发限流时不要立刻密集回退单票接口。
+                    # 客户端已完成指数退避;这里再留出冷却窗口后仅重试一次批量请求。
+                    cooldown = max(_HIST_RATE_LIMIT_COOLDOWN_S, err.retry_after_s or 0.0)
+                    logger.warning(
+                        "扶摇批量日K持续限流,暂停 %.2fs 后重试批量接口 (%d 只)",
+                        cooldown, len(batch),
+                    )
+                    time.sleep(cooldown)
+                    try:
+                        grouped = client.historical_kline_batch(batch, start, chunk_end)
+                    except FuyaoRateLimitError as retry_err:
+                        raise ProviderRequestError(
+                            f"扶摇批量日K连续限流,已停止单票密集回退: {retry_err}"
+                        ) from retry_err
                 except FuyaoError as err:
                     logger.warning("扶摇批量日K不可用,回退单标的接口 (%d 只): %s", len(batch), err)
                     grouped = {}
@@ -913,7 +930,7 @@ class FuyaoProvider:
     # ---- financial ----
     # 字段映射: 扶摇原始字段 → 项目 canonical 列名(TickFlow 口径, 前端财务页与回测
     # FUNDAMENTAL_FACTORS 按此消费)。映射表之外的扶摇独有字段以原名透传为扩展列。
-    _INCOME_FIELD_MAP = {
+    _INCOME_FIELD_MAP = {  # noqa: RUF012
         "operating_income": "revenue",
         "operating_costs": "operating_cost",
         "sales_fee": "selling_expense",
@@ -927,7 +944,7 @@ class FuyaoProvider:
         "parent_holder_net_profit": "net_income_attributable",
         "basic_eps": "basic_eps",
     }
-    _BALANCE_FIELD_MAP = {
+    _BALANCE_FIELD_MAP = {  # noqa: RUF012
         "assets_total": "total_assets",
         "total_current_assets": "total_current_assets",
         "non_current_nets_total": "total_non_current_assets",
@@ -936,7 +953,7 @@ class FuyaoProvider:
         "total_debt": "total_liabilities",
         "holder_equity_total": "total_equity",
     }
-    _CASHFLOW_FIELD_MAP = {
+    _CASHFLOW_FIELD_MAP = {  # noqa: RUF012
         "act_cash_flow_net": "net_operating_cash_flow",
         "invest_cash_flow_net": "net_investing_cash_flow",
         "financing_cash_flow_net": "net_financing_cash_flow",
@@ -945,7 +962,7 @@ class FuyaoProvider:
     }
     # 官方指标 index_id → canonical。归母净利同比近似 tickflow net_income_yoy;
     # 实测 index_id 与文档有出入(calculate_ 前缀等), 以实测为准。
-    _METRICS_FIELD_MAP = {
+    _METRICS_FIELD_MAP = {  # noqa: RUF012
         "index_weighted_avg_roe": "roe",
         "total_assets_net_ratio": "roa",
         "sale_gross_margin": "gross_margin",
@@ -1182,7 +1199,7 @@ class FuyaoProvider:
                 )
                 for f in df.partition_by("symbol")
             }
-        except Exception as e:  # 缓存损坏等不致命: 回退逐标的接口
+        except Exception as e:  # 缓存损坏等不致命: 回退逐标的接口  # noqa: BLE001
             logger.warning("扶摇除权因子本地配价失败, 回退单标的接口: %s", e)
             return None
 

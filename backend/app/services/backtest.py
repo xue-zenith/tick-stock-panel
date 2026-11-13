@@ -30,7 +30,7 @@ _vbt = None
 _vbt_unavailable_reason: str | None = None
 
 
-class VectorbtUnavailable(RuntimeError):
+class VectorbtUnavailable(RuntimeError):  # noqa: N818
     """vectorbt 未安装 — 提示用户 `uv sync --extra backtest`."""
 
 
@@ -319,7 +319,7 @@ class BacktestService:
                 pf_kwargs["exits"] = (exits | forced_exits).astype(bool)
 
             pf = vbt.Portfolio.from_signals(**pf_kwargs)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.exception("vectorbt backtest failed")
             return BacktestResult(
                 run_id=run_id,

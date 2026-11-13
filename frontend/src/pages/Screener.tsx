@@ -333,7 +333,7 @@ export function Screener() {
 
   // 策略文件加载失败时提示用户(避免"策略静默消失"被误判为正常)。
   // 多个失败聚合为一条, 避免旧数据目录升级后 (内置模块移除/叠加断链) 刷屏。
-  const loadErrors = strategies.data?.load_errors ?? []
+  const loadErrors = useMemo(() => strategies.data?.load_errors ?? [], [strategies.data?.load_errors])
   useEffect(() => {
     if (loadErrors.length === 0) return
     if (loadErrors.length === 1) {
@@ -646,7 +646,7 @@ export function Screener() {
   const intradayTruncated = intradayVisible && !fullMinuteHealthy && allIntradaySymbols.length > minuteBatchCap
   const intradaySymbols = useMemo(
     () => intradayTruncated ? allIntradaySymbols.slice(0, minuteBatchCap) : allIntradaySymbols,
-    [allIntradaySymbols, intradayTruncated, minuteBatchCap, fullMinuteHealthy],
+    [allIntradaySymbols, intradayTruncated, minuteBatchCap],
   )
   const intradayRequestSymbols = useMemo(
     () => [...new Set(intradaySymbols)].sort(),

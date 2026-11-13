@@ -26,9 +26,9 @@ def _panel(limit_day_idx: int | None, one_price: bool) -> pl.DataFrame:
             prev_close = 10.0 + (i - 1) * 0.05
             limit = round(prev_close * 1.1, 2)
             if one_price:
-                o = h = l = c = limit
+                o = h = l = c = limit  # noqa: E741
             else:
-                o, l = px, px - 0.1
+                o, l = px, px - 0.1  # noqa: E741
                 h = c = limit
             rows.append({
                 "symbol": "A", "date": start + timedelta(days=i),

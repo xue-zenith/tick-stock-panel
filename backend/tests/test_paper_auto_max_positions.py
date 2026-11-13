@@ -99,7 +99,7 @@ def test_max_positions_does_not_limit_sell(data_dir: Path, monkeypatch):
     paper.create_account(data_dir, 1_000_000)
     # 先建仓两标的各 1000 股 (即时单 + 钩子撮合; 卖出按金额 1万/价10 = 1000 股)
     for sym in (SYM, SYM2):
-        order, err = paper.create_order(data_dir, sym, "buy", qty=1000, ref_price=10.0)
+        _order, err = paper.create_order(data_dir, sym, "buy", qty=1000, ref_price=10.0)
         assert err is None
     paper.evaluate_intraday(data_dir, {SYM: 10.0, SYM2: 10.0})
     # 推进到次一交易日, 绕开 T+1 可卖限制
@@ -168,7 +168,7 @@ def test_auto_side_rejects_non_strategy_match(tmp_path: Path):
     with pytest.raises(ValueError, match="auto"):
         paper_auto.create_auto_rule(tmp_path, _rule(side="auto", match_kind="rule"))
     # normalize: strategy 缺 side → auto; rule 缺 side → buy (存量兼容)
-    no_side = _rule(); no_side.pop("side")
+    no_side = _rule(); no_side.pop("side")  # noqa: E702
     assert paper_auto.normalize_rule(no_side)["side"] == "auto"
-    no_side_r = _rule(match_kind="rule"); no_side_r.pop("side")
+    no_side_r = _rule(match_kind="rule"); no_side_r.pop("side")  # noqa: E702
     assert paper_auto.normalize_rule(no_side_r)["side"] == "buy"

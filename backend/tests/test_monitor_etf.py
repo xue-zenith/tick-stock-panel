@@ -5,10 +5,10 @@ from app.strategy.monitor import MonitorRuleEngine
 def test_history_loader_selection_by_asset_type():
     eng = MonitorRuleEngine()
 
-    def stock_loader(d, l):
+    def stock_loader(d, l):  # noqa: E741
         return "STOCK"
 
-    def etf_loader(d, l):
+    def etf_loader(d, l):  # noqa: E741
         return "ETF"
 
     eng.set_history_loader(stock_loader)

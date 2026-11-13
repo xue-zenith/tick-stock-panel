@@ -32,7 +32,7 @@ afterEach(async () => {
 })
 
 async function render(assetType: 'stock' | 'etf' = 'etf') {
-  await act(async () => root.render(<QueryClientProvider client={client}><MemoryRouter>
+  await act(async () => root.render(<QueryClientProvider client={client}><MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
     <PriceAlertDialog symbol={assetType === 'etf' ? '159558.SZ' : '600000.SH'} name="测试" assetType={assetType}
       initialTarget={0.827} initialCurrentPrice={0.800} onClose={() => {}} />
   </MemoryRouter></QueryClientProvider>))

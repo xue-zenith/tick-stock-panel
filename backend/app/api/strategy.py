@@ -109,12 +109,12 @@ def _cleanup_deleted_strategy(request: Request, strategy_id: str) -> list[str]:
 
     try:
         strategy_config.delete_override(data_dir, strategy_id)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         warnings.append(f"覆盖配置清理失败: {e}")
 
     try:
         _invalidate_strategy_runtime(request)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         warnings.append(f"运行缓存清理失败: {e}")
 
     try:
@@ -123,7 +123,7 @@ def _cleanup_deleted_strategy(request: Request, strategy_id: str) -> list[str]:
             preferences.set_realtime_monitor_config({
                 "strategy_monitor_ids": [sid for sid in monitored_ids if sid != strategy_id],
             })
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         warnings.append(f"监控偏好清理失败: {e}")
 
     try:
@@ -142,7 +142,7 @@ def _cleanup_deleted_strategy(request: Request, strategy_id: str) -> list[str]:
         monitor_engine = getattr(request.app.state, "monitor_engine", None)
         if rules_changed and monitor_engine is not None:
             monitor_engine.set_rules(monitor_rules.load_all(data_dir))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         warnings.append(f"关联监控清理失败: {e}")
 
     for warning in warnings:
@@ -777,7 +777,7 @@ def _normalize_build_result(result: dict, strategy_id: str, name: str = "",
             description.strip() or None,
         )
         return {**result, "code": code, "meta": AIStrategyGenerator._extract_meta(code)}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {**result, "valid": False, "error": f"规范化 META 失败: {e}"}
 
 
@@ -847,9 +847,8 @@ def save_strategy_code_core(
     不留下半截状态。调用方负责清缓存 (端点走 _invalidate_strategy_runtime)。
     """
     sid = _validate_strategy_id(req.strategy_id)
-    if legacy_ai_path:
-        if not (sid.startswith("ai_") or sid.startswith("custom_")):
-            raise ValueError("策略 ID 必须以 ai_ 或 custom_ 开头")
+    if legacy_ai_path and not (sid.startswith("ai_") or sid.startswith("custom_")):
+        raise ValueError("策略 ID 必须以 ai_ 或 custom_ 开头")
 
     existing: StrategyDef | None = None
     try:
@@ -1038,7 +1037,7 @@ async def ai_test(request: Request):
             timeout=15,
         )
         return {"ok": True, "model": current_ai_model() or current_ai_provider(), "response": text[:80]}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {
             "ok": False,
             "error": str(e) or repr(e),
@@ -1120,7 +1119,7 @@ async def build_strategy_stream(req: BuildRequest, request: Request):
             yield json.dumps({"type": "result", **result}, ensure_ascii=False)
         except RuntimeError as e:
             yield json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             yield json.dumps({"type": "error", "message": f"AI生成失败: {e}"}, ensure_ascii=False)
 
     # 与复盘/个股/财务/轮动的流式端点同口径: 事件行不带换行, 由外层统一补换行。
@@ -1179,7 +1178,7 @@ async def ai_iterate(req: AIIterateRequest, request: Request):
     except Exception:
         # 内部异常详情只进日志, 不透给客户端 (§8)
         logger.exception("AI 迭代失败")
-        raise HTTPException(status_code=500, detail="AI 迭代失败, 请稍后重试")
+        raise HTTPException(status_code=500, detail="AI 迭代失败, 请稍后重试")  # noqa: B904
     return result
 
 
@@ -1188,7 +1187,7 @@ def validate_strategy_code(req: StrategyCodeValidateRequest, request: Request):
     try:
         prepared = _prepare_strategy_code(req)
         return {"valid": True, "error": None, **prepared}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"valid": False, "error": str(e), "code": req.code, "meta": {}}
 
 

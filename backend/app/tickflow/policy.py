@@ -18,8 +18,8 @@ from typing import Any
 
 import yaml
 
-from app.config import settings
 from app import secrets_store
+from app.config import settings
 
 from .capabilities import Cap, CapabilityLimits, CapabilitySet
 
@@ -79,9 +79,7 @@ def _is_transient(e: Exception) -> bool:
         return True
     # APIError 体系下,status_code 5xx/429 视为瞬时
     status = getattr(e, "status_code", None)
-    if isinstance(status, int) and (status == 429 or status >= 500):
-        return True
-    return False
+    return bool(isinstance(status, int) and (status == 429 or status >= 500))
 
 
 def _call_with_retry(fn, attempts: int = 3, backoff: float = 0.6) -> None:
@@ -94,7 +92,7 @@ def _call_with_retry(fn, attempts: int = 3, backoff: float = 0.6) -> None:
         try:
             fn()
             return
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             last_exc = e
             # 权限/参数类错误:重试无意义,立即抛出交给 try_call 归类
             if not _is_transient(e):
@@ -118,7 +116,8 @@ def _probe_real(tiers: dict) -> tuple[CapabilitySet, list[str], set[Cap]]:
     返回 (capset, probe_log)。
     """
     from tickflow import TickFlow
-    from .client import _base_url, PAID_ENDPOINT
+
+    from .client import PAID_ENDPOINT, _base_url
 
     key = secrets_store.get_tickflow_key()
     # 探测专用客户端:强制走付费端点验证 key。
@@ -200,7 +199,7 @@ def _probe_real(tiers: dict) -> tuple[CapabilitySet, list[str], set[Cap]]:
         unis = tf.universes.list()
         if not unis:
             raise RuntimeError("no universes available")
-        first_id = unis[0]["id"] if isinstance(unis[0], dict) else getattr(unis[0], "id")
+        first_id = unis[0]["id"] if isinstance(unis[0], dict) else unis[0].id
         return tf.quotes.get_by_universes([first_id], as_dataframe=False)
 
     try_call(Cap.QUOTE_POOL, _probe_pool, defaults(Cap.QUOTE_POOL))
@@ -319,8 +318,8 @@ _DATASET_CAP_MAP: tuple[tuple[str, Cap], ...] = (
 def _augment_custom_sources(capset: CapabilitySet) -> None:
     """根据用户配置的数据源, 补充对应能力 (不覆盖 TickFlow 已有的)。"""
     try:
-        from app.services import preferences
         from app.data_providers import custom as custom_sources
+        from app.services import preferences
 
         daily_provider = preferences.get_daily_data_provider()
         adj_provider = preferences.get_adj_factor_provider()
@@ -396,7 +395,7 @@ def _detect_tickflow_caps(force: bool = False) -> CapabilitySet:
         if classified.is_free:
             # 免费有效 key:按 free 档能力持久化(日K free-api + 按标的实时)。
             capset = _tier_to_capset(tiers["free"])
-            _persist(capset, "Free", log=probe_log + ["✓ 免费有效 key(运行时走 free-api 服务器)"], missing=[], extras=[])
+            _persist(capset, "Free", log=[*probe_log, "✓ 免费有效 key(运行时走 free-api 服务器)"], missing=[], extras=[])
             return capset
         # 付费档(starter+) — 探测出的能力即为真实可用
         label, missing, extras = _compute_label_and_missing(capset, tiers)
@@ -519,7 +518,7 @@ def _override_limits_with_detected_tier(
 
 def _tier_caps_set(tiers: dict, tier_name: str) -> set[Cap]:
     """读 tiers.yaml 的某档定义,转为 Cap 集合。"""
-    return {Cap(c) for c in tiers.get(tier_name, {}).keys() if c in {x.value for x in Cap}}
+    return {Cap(c) for c in tiers.get(tier_name, {}) if c in {x.value for x in Cap}}
 
 
 def _compute_label_and_missing(

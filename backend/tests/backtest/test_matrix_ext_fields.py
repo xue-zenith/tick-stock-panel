@@ -128,7 +128,7 @@ def test_matrix_load_attaches_ext_fields_aligned(data_dir: Path):
     assert arr.shape == (len(DATES), len(SYMS))
     labels = list(market.timestamp_labels)
     syms = list(market.symbols)
-    i0, i1 = labels.index(DATES[0].isoformat()), syms.index(SYMS[0])
+    i0, _i1 = labels.index(DATES[0].isoformat()), syms.index(SYMS[0])
     j1 = syms.index(SYMS[1])
     assert arr[i0, i0 - i0] == pytest.approx(15.0)     # 600001 首日排名 15
     assert arr[labels.index(DATES[-1].isoformat()), j1] != arr[labels.index(DATES[-1].isoformat()), j1]  # 600002 末日缺失 → NaN

@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Check, Folder, Inbox, List, LoaderCircle, RefreshCw } from 'lucide-react'
@@ -61,7 +61,7 @@ export function WatchlistGroupMenu({
   const groups = groupsQuery.data?.groups ?? []
   const showPreferred = preferredGroupId !== undefined
 
-  const placeMenu = () => {
+  const placeMenu = useCallback(() => {
     const trigger = triggerRef.current
     if (!trigger) return
 
@@ -79,7 +79,7 @@ export function WatchlistGroupMenu({
       Math.min(rawLeft, window.innerWidth - MENU_WIDTH - VIEWPORT_GAP),
     )
     setPosition({ top, left })
-  }
+  }, [align])
 
   const toggleMenu = () => {
     if (disabled) return
@@ -94,7 +94,7 @@ export function WatchlistGroupMenu({
   useLayoutEffect(() => {
     if (!open) return
     placeMenu()
-  }, [open, groups.length, groupsQuery.isPending])
+  }, [open, groups.length, groupsQuery.isPending, placeMenu])
 
   useEffect(() => {
     if (!open) return

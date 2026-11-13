@@ -90,7 +90,7 @@ async function tick() {
 
 async function render() {
   await act(async () => root.render(
-    <MemoryRouter><QueryClientProvider client={client}><Screener /></QueryClientProvider></MemoryRouter>,
+    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={client}><Screener /></QueryClientProvider></MemoryRouter>,
   ))
   await tick()
 }

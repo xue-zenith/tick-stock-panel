@@ -32,7 +32,7 @@ it('注册菜单不加载页面；直接访问扩展路由只加载该页面', a
   const root = createRoot(container)
   try {
     await act(async () => root.render(
-      <MemoryRouter initialEntries={['/paper']}>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={['/paper']}>
         <Suspense fallback={<span>加载中</span>}>
           <Routes>{registry.getFrontendExtensionRoutes().map(route => {
             const Page = route.component

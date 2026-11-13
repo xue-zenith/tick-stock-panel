@@ -203,7 +203,7 @@ function BatchDiscovery({
     queryFn: api.watchlistList,
     staleTime: 30_000,
   })
-  const watchlistEntries = watchlist.data?.symbols ?? []
+  const watchlistEntries = useMemo(() => watchlist.data?.symbols ?? [], [watchlist.data?.symbols])
   const watchlistCounts = useMemo(() => {
     // 多组并存: 一股计入每个所属分组
     const counts: Record<string, number> = { ungrouped: 0 }
@@ -220,7 +220,7 @@ function BatchDiscovery({
     for (const column of allColumns) (groups[column.group] ??= []).push(column)
     return groups
   }, [allColumns])
-  const presetIds = (preset: PresetDef): string[] => {
+  const presetIds = useCallback((preset: PresetDef): string[] => {
     if (preset.id === 'all') return allColumns.map(item => item.id)
     if (preset.quick) {
       // 每组取列表中位代表 (上游按窗口升序排列时即窗口中位数, 如动量组取 20日)
@@ -231,7 +231,7 @@ function BatchDiscovery({
         .map(item => item.id)
     }
     return (preset.groups ?? []).flatMap(group => columnsByGroup[group] ?? []).map(item => item.id)
-  }
+  }, [allColumns, columnsByGroup])
 
   useEffect(() => {
     if (initialized.current || !columns.data?.columns.length) return
@@ -245,7 +245,7 @@ function BatchDiscovery({
     // 默认快速体检 (每组 1 个代表因子): 全市场×全因子×3 个月对首次用户太重
     setSelected(presetIds(QUICK_PRESET))
     setActivePreset('quick')
-  }, [columns.data, focusFactor])
+  }, [columns.data, focusFactor, presetIds])
 
   const factorGroups = useMemo(() => {
     // 搜索只影响展示, 不改变已选集合; 匹配 id/中文label/公式描述

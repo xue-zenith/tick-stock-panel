@@ -82,7 +82,7 @@ export function SettingsImportCenterPanel() {
   const pages = useQuery({ queryKey: QK.extPages, queryFn: api.extPagesList, enabled: view === 'installed' || review?.kind === 'page' || review?.kind === 'project' })
   const namespaces = useQuery({ queryKey: QK.extPagesSourceNamespaces, queryFn: api.extPagesSourceNamespaces, enabled: view === 'import' && !review && !result })
   const matrix = useQuery({ queryKey: QK.capabilityMatrix, queryFn: api.capabilityMatrix, enabled: review?.kind === 'source' })
-  const entries = review?.kind === 'resources' ? review.preview.entries : []
+  const entries = useMemo(() => review?.kind === 'resources' ? review.preview.entries : [], [review])
   const effective = useMemo(() => resourceClosure(entries, selected), [entries, selected])
   const included = entries.filter(entry => effective.has(entry.key))
   const conflicts = included.filter(entry => entry.action === 'conflict')

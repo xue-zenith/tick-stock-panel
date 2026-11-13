@@ -47,7 +47,7 @@ def _round_checkpoint() -> int:
 
     try:
         return max(0, int(current_ai_round_checkpoint()))
-    except Exception:  # 配置异常时退回默认, 不因配置问题掐断对话
+    except Exception:  # 配置异常时退回默认, 不因配置问题掐断对话  # noqa: BLE001
         return _TOOL_ROUND_CHECKPOINT
 
 _SETTINGS_HINT = "/settings?tab=ai"
@@ -350,7 +350,7 @@ async def chat_stream(
                         "tool_call_id": call["id"],
                         "content": json.dumps(result, ensure_ascii=False),
                     })
-        except Exception as exc:  # 单轮失败收敛为 error 事件, 不打断流
+        except Exception as exc:  # 单轮失败收敛为 error 事件, 不打断流  # noqa: BLE001
             await queue.put(_classify_exception(exc))
         finally:
             await queue.put({"type": "done"})

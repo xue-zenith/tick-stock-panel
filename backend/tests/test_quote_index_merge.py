@@ -84,11 +84,12 @@ def test_index_live_write_without_monitor_rules(monkeypatch) -> None:
     核心四只每轮已显式拉取, 写盘不得再门控 has_asset_rules("index"),
     否则盘中 kline_index_enriched 停在上一交易日, 读侧无法注入当日K。
     """
-    from datetime import datetime, time as dt_time
+    from datetime import datetime
+    from datetime import time as dt_time
     from types import SimpleNamespace
 
-    from app.market_time import CN_TZ, cn_today
     import app.services.quote_service as qs_module
+    from app.market_time import CN_TZ, cn_today
     from app.services.quote_service import QuoteService
 
     class _Engine:

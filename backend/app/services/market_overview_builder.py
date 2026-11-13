@@ -376,11 +376,7 @@ def _pct_band_rows(values: list[float]) -> list[dict]:
     for label, low, high in bands:
         count = 0
         for v in values:
-            if low is None and v < high:
-                count += 1
-            elif high is None and v >= low:
-                count += 1
-            elif low is not None and high is not None and low <= v < high:
+            if (low is None and v < high) or (high is None and v >= low) or (low is not None and high is not None and low <= v < high):
                 count += 1
         out.append({"label": label, "count": count, "pct": count / total * 100})
     return out

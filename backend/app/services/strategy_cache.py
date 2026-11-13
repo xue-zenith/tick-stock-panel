@@ -177,10 +177,7 @@ def _write_cache_locked(
     old_as_of = old.get("as_of") if old else None
     old_ever_rows: dict[str, dict[str, dict]] = old.get("today_ever_rows", {}) if old else {}
 
-    if old_as_of == as_of:
-        merged_results = {**(old.get("results") or {}), **results}
-    else:
-        merged_results = results
+    merged_results = {**(old.get("results") or {}), **results} if old_as_of == as_of else results
 
     # 当前命中的行数据 → symbol 映射
     current_row_maps: dict[str, dict[str, dict]] = {}

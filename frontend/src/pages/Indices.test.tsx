@@ -95,7 +95,7 @@ async function clickDay(day: string) {
 
 it('keeps selected dates isolated across delayed, out-of-order and cached responses', async () => {
   await act(async () => root.render(
-    <MemoryRouter><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>,
+    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>,
   ))
   await settle()
   const chart = () => host.querySelector<HTMLElement>('[data-chart]')

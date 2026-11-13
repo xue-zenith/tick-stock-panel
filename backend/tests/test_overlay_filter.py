@@ -48,7 +48,7 @@ def test_validate_overlay_accepts_day_offsets_within_limit() -> None:
         {"left": "close", "op": ">", "right": "field:close", "leftDays": 1, "rightDays": 60}])
     custom_signals.validate_overlay_conditions([
         {"left": "close", "op": ">", "right": 1, "leftDays": 0}])
-    with pytest.raises(ValueError, match="0..60"):
+    with pytest.raises(ValueError, match="0..60"):  # noqa: RUF043
         custom_signals.validate_overlay_conditions([
             {"left": "close", "op": ">", "right": 1, "leftDays": 61}])
     with pytest.raises(ValueError, match="必须是整数"):

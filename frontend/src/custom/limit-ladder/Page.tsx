@@ -1556,7 +1556,7 @@ export function LimitUpLadder() {
     setDimensionTarget({ kind, value, sourceField, date: (data?.as_of ?? asOf) || undefined })
   }, [asOf, data?.as_of])
 
-  const rawTiers = data?.tiers ?? []
+  const rawTiers = useMemo(() => data?.tiers ?? [], [data?.tiers])
   // filterTiers 每次返回新数组, 不 memo 会破坏 React.memo(StockCard) 且全梯队二次排序
   const tiers = useMemo(() => filterTiers(rawTiers, filterKeys, extFields.bf), [rawTiers, filterKeys, extFields.bf])
   const displayDate = data?.as_of ?? asOf

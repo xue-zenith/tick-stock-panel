@@ -117,7 +117,7 @@ def test_import_watchlist_image_with_fake_ocr(tmp_path: Path):
 
 
 def test_import_unavailable_mentions_windows():
-    with pytest.raises(RuntimeError, match="Windows|choco|UB Mannheim"):
+    with pytest.raises(RuntimeError, match="Windows|choco|UB Mannheim"):  # noqa: RUF043
         import_watchlist_image(
             b"x",
             Path("/tmp"),

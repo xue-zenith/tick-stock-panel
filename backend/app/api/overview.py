@@ -14,7 +14,6 @@ from fastapi import APIRouter, Request
 
 from app.services.ext_data import ExtConfig, ExtConfigStore
 from app.services.index_const import CORE_INDEX_NAMES, CORE_INDEX_SYMBOLS
-from app.services.screener import ScreenerService
 
 router = APIRouter(prefix="/api/overview", tags=["overview"])
 
@@ -338,11 +337,7 @@ def _pct_band_rows(values: list[float]) -> list[dict]:
     for label, low, high in bands:
         count = 0
         for v in values:
-            if low is None and v < high:
-                count += 1
-            elif high is None and v >= low:
-                count += 1
-            elif low is not None and high is not None and low <= v < high:
+            if (low is None and v < high) or (high is None and v >= low) or (low is not None and high is not None and low <= v < high):
                 count += 1
         out.append({"label": label, "count": count, "pct": count / total * 100})
     return out

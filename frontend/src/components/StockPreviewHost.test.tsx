@@ -28,7 +28,7 @@ afterEach(async () => {
 })
 
 it('reuses one host dialog for source calls, preserves list navigation and supports both close entry points', async () => {
-  await act(async () => root.render(<MemoryRouter><StockPreviewHost /></MemoryRouter>))
+  await act(async () => root.render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><StockPreviewHost /></MemoryRouter>))
   expect(host.querySelector('[role=dialog]')).toBeNull()
   await act(async () => { openStockPreview({ symbol: '159558.SZ', navList: [{ symbol: '159558.SZ' }, { symbol: '605365.SH', name: '立达信' }] }) })
   expect(host.textContent).toContain('159558.SZ')
@@ -58,14 +58,14 @@ it('passes the public UI bridge to an installed page and runs its normal unmount
     navigation: [{ id: 'preview', routeId: 'preview', label: '详情测试' }],
   }).routes![0].component
   const Page = page
-  await act(async () => root.render(<MemoryRouter><Page /><StockPreviewHost /></MemoryRouter>))
+  await act(async () => root.render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><Page /><StockPreviewHost /></MemoryRouter>))
   await act(async () => [...host.querySelectorAll('button')].find(button => button.textContent === '插件查看详情')!.click())
   expect(host.querySelector('[role=dialog]')?.textContent).toContain('159558.SZ ETF')
   await act(async () => root.unmount())
   expect(cleanup).toHaveBeenCalledOnce()
   expect(getStockPreviewRequest()).toBeNull()
   root = createRoot(host)
-  await act(async () => root.render(<MemoryRouter><StockPreviewHost /></MemoryRouter>))
+  await act(async () => root.render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><StockPreviewHost /></MemoryRouter>))
   expect(host.querySelector('[role=dialog]')).toBeNull()
 })
 
@@ -80,7 +80,7 @@ it.each(['none', 'effect', 'layout'] as const)('route changes clear the old prev
     return null
   }
   function Shell() { return <><Outlet /><StockPreviewHost /></> }
-  await act(async () => root.render(<MemoryRouter><Routes><Route element={<Shell />}>
+  await act(async () => root.render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><Routes><Route element={<Shell />}>
     <Route index element={<Start />} /><Route path="next" element={<Next />} />
   </Route></Routes></MemoryRouter>))
   await act(async () => { openStockPreview({ symbol: '159558.SZ' }) })

@@ -40,7 +40,7 @@ export function FactorLibrary({ onInspect, onEdit }: { onInspect: (factorId: str
     // 注册表近乎静态 (只在保存/删除自定义因子时变化, 届时主动 invalidate), 切 tab 不再闪 loading
     staleTime: 60_000,
   })
-  const factors = lib.data?.factors ?? []
+  const factors = useMemo(() => lib.data?.factors ?? [], [lib.data?.factors])
 
   const groups = useMemo(
     () => Array.from(new Set(factors.map(item => item.group))).sort((a, b) => a.localeCompare(b, 'zh')),

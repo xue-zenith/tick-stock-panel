@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Sparkles, X } from 'lucide-react'
@@ -64,11 +64,11 @@ export function AutoMiningDialog({
     queryFn: () => api.miningAvailability({ ...availabilityArgs, budgetProfile: 'strict' }),
     staleTime: 30_000,
   })
-  const availability: Partial<Record<MiningBudgetProfile, MiningAvailability>> = {
+  const availability = useMemo<Partial<Record<MiningBudgetProfile, MiningAvailability>>>(() => ({
     exploratory: exploratoryQuery.data,
     balanced: balancedQuery.data,
     strict: strictQuery.data,
-  }
+  }), [exploratoryQuery.data, balancedQuery.data, strictQuery.data])
   const bars = exploratoryQuery.data?.trading_bars ?? balancedQuery.data?.trading_bars ?? strictQuery.data?.trading_bars ?? null
   const currentAvailable = availability[profile]?.eligible ?? null
 
@@ -83,7 +83,7 @@ export function AutoMiningDialog({
         toast(`当前数据 ${availability.balanced.trading_bars} 个交易日不够「均衡」档 (需 ${availability.balanced.required_bars})，已自动切到「${PROFILE_LABELS[fallback]}」档`)
       }
     }
-  }, [availability.exploratory, availability.balanced, availability.strict, profile, profileTouched])
+  }, [availability, profile, profileTouched])
 
   const submitAutoMining = () => {
     // L1 全量筛选在后端要跑几分钟: 模块级任务提交后本弹窗立刻关闭,

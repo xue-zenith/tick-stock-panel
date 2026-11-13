@@ -242,7 +242,7 @@ def _timeseries_frame(root: Path, config, fields: list) -> pl.DataFrame:
                 continue
             try:
                 raw = pl.read_parquet(part)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning("扩展表 %s 分区 %s 读取失败, 跳过: %s", config.id, d.name, e)
                 continue
             frag = _select_fields(raw, config, fields, with_date=d.name[5:])
@@ -276,7 +276,7 @@ def _snapshot_frame(root: Path, config, fields: list) -> pl.DataFrame:
             frame = frame.unique(subset=["symbol"], keep="last")
         _frame_cache[key] = (sig, frame)
         return frame
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning("扩展表 %s 快照读取失败, 跳过: %s", config.id, e)
         return pl.DataFrame()
 
@@ -334,7 +334,7 @@ def attach_ext_columns(
                     if not new_cols:
                         continue
                     df = df.join(snap.select(["symbol", *new_cols]), on="symbol", how="left")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning("扩展表 %s 列注入失败, 跳过该表: %s", cfg.id, e)
     finally:
         if tmp_date:
@@ -416,5 +416,5 @@ def invalidate_ext_caches(data_dir: Path | None = None, *, keep_strategy_cache: 
 
     try:
         strategy_cache.clear_cache(Path(data_dir) if data_dir else Path(_settings.data_dir))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning("扩展数据变更后策略缓存清理失败: %s", e)

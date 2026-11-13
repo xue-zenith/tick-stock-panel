@@ -246,7 +246,7 @@ class _CacheEntry:
 class _InFlight:
     """同 key 正在计算的占位: leader 算完通过 done 唤醒所有跟随者复用结果。"""
 
-    __slots__ = ("done", "df", "error")
+    __slots__ = ("df", "done", "error")
 
     def __init__(self) -> None:
         self.done = threading.Event()
@@ -790,9 +790,9 @@ class BacktestEngine:
                     & (pl.col("date") <= end)
                 )
                 .sort(["symbol", "date"])
-                .collect(streaming=True)
+                .collect(engine="streaming")
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning("backtest load panel failed: %s", e)
             return pl.DataFrame()
 
@@ -916,7 +916,7 @@ class BacktestEngine:
                         exit_reason = "signal"
 
                     # 最大持仓天数 (兜底: 无信号/未止损时强制平仓)
-                    if not exit_triggered and config.max_hold_days is not None:
+                    if not exit_triggered and config.max_hold_days is not None:  # noqa: SIM102
                         if hold_days >= config.max_hold_days:
                             exit_triggered = True
                             exit_reason = "max_hold"
@@ -967,8 +967,8 @@ class BacktestEngine:
         entries: pl.Series | None,
         exits: pl.Series | None,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None" = None,
-        cancel_event: "threading.Event | None" = None,
+        progress_cb: Callable[[dict], None] | None = None,
+        cancel_event: threading.Event | None = None,
         entry_signal_ids: list[str] | None = None,
         exit_signal_ids: list[str] | None = None,
     ) -> SimResult:
@@ -993,7 +993,7 @@ class BacktestEngine:
         )
 
     @staticmethod
-    def _resolve_entry_prices(matrix: "MarketMatrix", config: "MatcherConfig") -> np.ndarray:
+    def _resolve_entry_prices(matrix: MarketMatrix, config: MatcherConfig) -> np.ndarray:
         """入场价矩阵: 分钟策略的逐格覆盖有限值处优先, 否则按 open/close 惯例。"""
         base = matrix.open if config.entry_fill == "open_t+1" else matrix.close
         if matrix.entry_price is None:
@@ -1005,8 +1005,8 @@ class BacktestEngine:
         matrix: MarketMatrix,
         raw_candidates: int,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None",
-        cancel_event: "threading.Event | None",
+        progress_cb: Callable[[dict], None] | None,
+        cancel_event: threading.Event | None,
         options: SimulationOptions | None = None,
     ) -> SimResult:
         options = options or SimulationOptions()
@@ -1151,7 +1151,7 @@ class BacktestEngine:
                 lines.append((peak_price * (1 - abs(config.trailing_stop_pct)), "trailing_stop"))
             activate = config.trailing_take_profit_activate_pct
             drawdown = config.trailing_take_profit_drawdown_pct
-            if activate is not None and drawdown is not None and peak_price > entry_price:
+            if activate is not None and drawdown is not None and peak_price > entry_price:  # noqa: SIM102
                 if peak_price / entry_price - 1 >= abs(float(activate)):
                     lines.append((peak_price * (1 - abs(float(drawdown))), "trailing_take_profit"))
             valid_lines = [(line, reason) for line, reason in lines if _valid_price(line)]
@@ -1254,14 +1254,14 @@ class BacktestEngine:
             if cancel_event is not None and cancel_event.is_set():
                 break
             if progress_cb is not None and (seq == 1 or seq % 500 == 0):
-                try:
+                try:  # noqa: SIM105
                     progress_cb({
                         "day": seq,
                         "total": len(order),
                         "date": matrix.timestamp_labels[time_id][:10],
                         "equity": 0,
                     })
-                except Exception:
+                except Exception:  # noqa: BLE001
                     pass
             ok, blocked = _can_buy(time_id, asset_id)
             if not ok:
@@ -1362,8 +1362,8 @@ class BacktestEngine:
         matrix: MarketMatrix,
         raw_candidates: int,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None" = None,
-        cancel_event: "threading.Event | None" = None,
+        progress_cb: Callable[[dict], None] | None = None,
+        cancel_event: threading.Event | None = None,
         options: SimulationOptions | None = None,
     ) -> SimResult:
         """Run independent-candidate simulation on a prebuilt MarketMatrix."""
@@ -1377,8 +1377,8 @@ class BacktestEngine:
         entries: pl.Series | None,
         exits: pl.Series | None,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None" = None,
-        cancel_event: "threading.Event | None" = None,
+        progress_cb: Callable[[dict], None] | None = None,
+        cancel_event: threading.Event | None = None,
         entry_signal_ids: list[str] | None = None,
         exit_signal_ids: list[str] | None = None,
     ) -> SimResult:
@@ -1540,7 +1540,7 @@ class BacktestEngine:
         def _is_suspended(idx: int) -> bool:
             o = float(open_prices[idx])
             h = float(high_prices[idx])
-            l = float(low_prices[idx])
+            l = float(low_prices[idx])  # noqa: E741
             c = float(close_prices[idx])
             valid_bar = any(_valid_price(x) for x in (o, h, l, c))
             if not valid_bar:
@@ -1556,7 +1556,7 @@ class BacktestEngine:
                 return False
             o = float(open_prices[idx])
             h = float(high_prices[idx])
-            l = float(low_prices[idx])
+            l = float(low_prices[idx])  # noqa: E741
             c = float(close_prices[idx])
             if not all(_valid_price(x) for x in (o, h, l, c)):
                 return False
@@ -1700,14 +1700,14 @@ class BacktestEngine:
                 logger.info("全量模拟被用户取消 (第 %d/%d 个候选)", seq, len(candidate_indices))
                 break
             if progress_cb is not None and (seq == 1 or seq % 500 == 0):
-                try:
+                try:  # noqa: SIM105
                     progress_cb({
                         "day": seq,
                         "total": len(candidate_indices),
                         "date": self._date_str(panel_dates[entry_idx]),
                         "equity": 0,
                     })
-                except Exception:
+                except Exception:  # noqa: BLE001
                     pass
 
             ok, block_reason = _can_buy(entry_idx)
@@ -1760,16 +1760,16 @@ class BacktestEngine:
                 d_str = self._date_str(panel_dates[idx])
 
                 def _scheduled_reason() -> tuple[str | None, str]:
-                    if pos.get("pending_exit_reason"):
-                        return str(pos["pending_exit_reason"]), str(pos.get("pending_exit_signal_date") or d_str)
+                    if pos.get("pending_exit_reason"):  # noqa: B023
+                        return str(pos["pending_exit_reason"]), str(pos.get("pending_exit_signal_date") or d_str)  # noqa: B023
                     # 卖点信号优先于到期: 策略主动离场先于 max_hold 兜底。
-                    if ext[idx]:
-                        return "signal", str(exit_signal_dates[idx] or d_str)
-                    if config.max_hold_days is not None and pos["hold_days"] >= config.max_hold_days:
-                        return "max_hold", d_str
-                    if idx == rows[-1]:
-                        return "end", d_str
-                    return None, d_str
+                    if ext[idx]:  # noqa: B023
+                        return "signal", str(exit_signal_dates[idx] or d_str)  # noqa: B023
+                    if config.max_hold_days is not None and pos["hold_days"] >= config.max_hold_days:  # noqa: B023
+                        return "max_hold", d_str  # noqa: B023
+                    if idx == rows[-1]:  # noqa: B023
+                        return "end", d_str  # noqa: B023
+                    return None, d_str  # noqa: B023
 
                 # 统一退出顺序: 风控(止损/移动止损/止盈)先于计划出场 (signal/max_hold/end)。
                 # 无论 entry/exit 口径如何, 风控都是保护性离场, 必须最高优先级。
@@ -1889,7 +1889,7 @@ class BacktestEngine:
         return float(opens[next_idx])
 
     # 分钟K cache 存储的数值列及固定顺序 (_resolve_minute_fill 按此顺序整数索引)。
-    _MINUTE_NUMERIC_COLS = ["open", "high", "low", "close", "volume", "amount"]
+    _MINUTE_NUMERIC_COLS = ["open", "high", "low", "close", "volume", "amount"]  # noqa: RUF012
 
     @staticmethod
     def _load_minute_for_fills(
@@ -1918,7 +1918,7 @@ class BacktestEngine:
 
         cache: dict = {}
         # 分批读取: 每批 50 个交易日, 处理完拼进 cache, 避免单批过大。
-        BATCH = 50
+        BATCH = 50  # noqa: N806
         numeric_cols = BacktestEngine._MINUTE_NUMERIC_COLS
         for i in range(0, len(date_objs), BATCH):
             batch = date_objs[i:i + BATCH]
@@ -1952,8 +1952,8 @@ class BacktestEngine:
         entries: pl.Series | None,
         exits: pl.Series | None,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None" = None,
-        cancel_event: "threading.Event | None" = None,
+        progress_cb: Callable[[dict], None] | None = None,
+        cancel_event: threading.Event | None = None,
         entry_signal_ids: list[str] | None = None,
         exit_signal_ids: list[str] | None = None,
     ) -> SimResult:
@@ -1979,8 +1979,8 @@ class BacktestEngine:
         self,
         matrix: MarketMatrix,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None" = None,
-        cancel_event: "threading.Event | None" = None,
+        progress_cb: Callable[[dict], None] | None = None,
+        cancel_event: threading.Event | None = None,
         options: SimulationOptions | None = None,
     ) -> SimResult:
         """Run the production Python matcher on a prebuilt MarketMatrix."""
@@ -1992,8 +1992,8 @@ class BacktestEngine:
         self,
         matrix: MarketMatrix,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None",
-        cancel_event: "threading.Event | None",
+        progress_cb: Callable[[dict], None] | None,
+        cancel_event: threading.Event | None,
         options: SimulationOptions | None = None,
     ) -> SimResult:
         options = options or SimulationOptions()
@@ -2253,14 +2253,14 @@ class BacktestEngine:
                     logger.info("回测被用户取消 (第 %d/%d 天)", time_id, time_count)
                     break
                 if progress_cb is not None:
-                    try:
+                    try:  # noqa: SIM105
                         progress_cb({
                             "day": time_id + 1,
                             "total": time_count,
                             "date": date_text,
                             "equity": round(cash + _market_value(), 2),
                         })
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         pass
 
             sold_today: set[int] = set()
@@ -2285,7 +2285,7 @@ class BacktestEngine:
                     risk_lines.append((peak_price * (1 - abs(config.trailing_stop_pct)), "trailing_stop"))
                 activate = config.trailing_take_profit_activate_pct
                 drawdown = config.trailing_take_profit_drawdown_pct
-                if activate is not None and drawdown is not None and peak_price > entry_price:
+                if activate is not None and drawdown is not None and peak_price > entry_price:  # noqa: SIM102
                     if peak_price / entry_price - 1 >= abs(float(activate)):
                         risk_lines.append((peak_price * (1 - abs(float(drawdown))), "trailing_take_profit"))
                 valid_lines = [(line, reason) for line, reason in risk_lines if _valid_price(line)]
@@ -2392,7 +2392,7 @@ class BacktestEngine:
                         total_budget = min(cash, exposure_capacity, target_value * len(selected))
                         if policy_scale < 1.0:
                             total_budget = max(total_budget * policy_scale, 0.0)
-                        for (asset_id, entry_score), weight in zip(selected, weights):
+                        for (asset_id, entry_score), weight in zip(selected, weights, strict=False):
                             if len(positions) >= max_positions:
                                 _count("buy_no_slot")
                                 break
@@ -2533,8 +2533,8 @@ class BacktestEngine:
         entries: pl.Series | None,
         exits: pl.Series | None,
         config: MatcherConfig,
-        progress_cb: "Callable[[dict], None] | None" = None,
-        cancel_event: "threading.Event | None" = None,
+        progress_cb: Callable[[dict], None] | None = None,
+        cancel_event: threading.Event | None = None,
         entry_signal_ids: list[str] | None = None,
         exit_signal_ids: list[str] | None = None,
     ) -> SimResult:
@@ -2729,7 +2729,7 @@ class BacktestEngine:
         def _is_suspended(idx: int) -> bool:
             o = float(open_prices[idx])
             h = float(high_prices[idx])
-            l = float(low_prices[idx])
+            l = float(low_prices[idx])  # noqa: E741
             c = float(close_prices[idx])
             valid_bar = any(_valid_price(x) for x in (o, h, l, c))
             if not valid_bar:
@@ -2745,7 +2745,7 @@ class BacktestEngine:
                 return False
             o = float(open_prices[idx])
             h = float(high_prices[idx])
-            l = float(low_prices[idx])
+            l = float(low_prices[idx])  # noqa: E741
             c = float(close_prices[idx])
             if not all(_valid_price(x) for x in (o, h, l, c)):
                 return False
@@ -3026,7 +3026,7 @@ class BacktestEngine:
             if policy_scale < 1.0:
                 total_budget = max(total_budget * policy_scale, 0.0)
 
-            for (idx, sym, _score), weight in zip(selected, weights):
+            for (idx, sym, _score), weight in zip(selected, weights, strict=False):
                 if len(positions) >= max_positions:
                     _count("buy_no_slot")
                     break
@@ -3075,14 +3075,14 @@ class BacktestEngine:
                     logger.info("回测被用户取消 (第 %d/%d 天)", d_idx, len(all_dates))
                     break
                 if progress_cb is not None:
-                    try:
+                    try:  # noqa: SIM105
                         progress_cb({
                             "day": d_idx + 1,
                             "total": len(all_dates),
                             "date": str(d_str)[:10],
                             "equity": round(cash + _market_value(), 2),
                         })
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         pass
 
             idxs = date_to_indices[d_str]
@@ -3465,8 +3465,8 @@ class BacktestEngine:
             "mode": "full",
             "full_kind": "candidate_execution",
             "n_candidates": int(n_candidates),
-            "n_trades": int(len(trades)),
-            "n_days": int(len(daily_returns)),
+            "n_trades": len(trades),
+            "n_days": len(daily_returns),
             "avg_daily_candidates": round(float(len(trades) / max(len(daily_returns), 1)), 1),
             "avg_return": round(float(np.mean(pnls)), 4),
             "median_return": round(float(np.median(pnls)), 4),

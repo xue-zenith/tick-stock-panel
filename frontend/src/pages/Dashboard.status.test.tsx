@@ -54,7 +54,7 @@ const busy = { indicators_ready: true, stats_pending: true, daily: null, enriche
 
 async function render() {
   await act(async () => root.render(
-    <MemoryRouter><QueryClientProvider client={client}><Dashboard /></QueryClientProvider></MemoryRouter>,
+    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={client}><Dashboard /></QueryClientProvider></MemoryRouter>,
   ))
   await tick(1)
 }

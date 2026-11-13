@@ -4,8 +4,8 @@
 主因之一。前端已按视口/分块收敛; 上限是后端侧的兜底防线, 值现在由用户偏好
 配置 (默认 400, 见 test_kline_batch_limits_config.py), 前端分块读同一偏好。
 """
-import json
 import datetime as _dt
+import json
 
 import polars as pl
 import pytest

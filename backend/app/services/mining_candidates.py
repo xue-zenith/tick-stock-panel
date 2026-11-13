@@ -814,7 +814,7 @@ class MiningCandidateService:
                 path.unlink()
                 self._fsync_directory(path.parent)
             self.strategy_engine.reload()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return exc
         return None
 
@@ -826,7 +826,7 @@ class MiningCandidateService:
                 path.unlink()
                 self._fsync_directory(path.parent)
             self.strategy_engine.reload()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return exc
         return None
 

@@ -1627,7 +1627,7 @@ def _evaluate_labels(
 ) -> CandidateEvaluation:
     try:
         raw = evaluator(train_labels, test_labels, candidate.definition())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return CandidateEvaluation(score=None, error=str(exc))
     return _normalize_evaluation(raw)
 
@@ -1640,7 +1640,7 @@ def _evaluate(
 ) -> CandidateEvaluation:
     try:
         raw = evaluator.evaluate_candidate(train, test, candidate.definition())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return CandidateEvaluation(score=None, error=str(exc))
     return _normalize_evaluation(raw)
 

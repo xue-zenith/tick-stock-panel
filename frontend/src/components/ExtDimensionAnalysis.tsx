@@ -168,7 +168,7 @@ export function ExtDimensionAnalysis({
   const [search, setSearch] = useState('')
   const [selectedGroup, setSelectedGroup] = useState<string | null>(null)
 
-  const availableConfigs = configs.data?.items ?? []
+  const availableConfigs = useMemo(() => configs.data?.items ?? [], [configs.data?.items])
   const activeConfigId = menu?.data_source || selectedConfigId || pickDefaultConfig(availableConfigs, keywords)
   const activeConfig = availableConfigs.find(c => c.id === activeConfigId)
   const activeDimensionField = menu?.dimension_field || dimensionField || pickDefaultDimensionField(activeConfig, fallbackFieldNames)
@@ -191,7 +191,7 @@ export function ExtDimensionAnalysis({
     enabled: !!activeConfigId,
   })
 
-  const rows = rowsQuery.data?.rows ?? []
+  const rows = useMemo(() => rowsQuery.data?.rows ?? [], [rowsQuery.data?.rows])
   const baseFields = activeConfig?.fields ?? rowsQuery.data?.fields ?? []
   const fields = rows.some(r => r.name != null) && !baseFields.some(f => f.name === 'name')
     ? [...baseFields, { name: 'name', dtype: 'string', label: '名称' }]

@@ -5132,10 +5132,10 @@ export const api = {
     request<{ ok: boolean }>(accUrl(`/api/paper/auto_rules/${encodeURIComponent(id)}`, account), { method: 'DELETE' }),
 
   paperRiskSnapshot: (account?: string) =>
-    request<{ available: boolean; reason?: string; snapshot?: PaperRiskSnapshot | null }>(accUrl('/api/paper/risk', account)),
+    request<{ available: boolean; reason?: string; data_date?: string | null; snapshot?: PaperRiskSnapshot | null }>(accUrl('/api/paper/risk', account)),
 
   paperRiskProposal: (account?: string) =>
-    request<{ available: boolean; reason?: string; preview?: PaperRiskPreview | null }>(accUrl('/api/paper/risk/proposal', account)),
+    request<{ available: boolean; reason?: string; data_date?: string | null; preview?: PaperRiskPreview | null }>(accUrl('/api/paper/risk/proposal', account)),
 
   /** 对比批量创建: 同本金/同费率一次开 N 个账户, 各绑一条自动跟单规则 */
   paperArenaCreate: (body: { initial_cash: number; sources: PaperArenaSource[]; name_prefix?: string; commission_pct?: number; stamp_tax_pct?: number; slippage_bps?: number }) =>

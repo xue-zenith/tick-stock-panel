@@ -65,7 +65,7 @@ def _get_custom_signal_exprs() -> dict[str, pl.Expr]:
         try:
             sigs = custom_signals.load_all(settings.data_dir)
             _custom_signal_exprs = custom_signals.build_expressions(sigs)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning("custom signals load failed: %s", e)
             _custom_signal_exprs = {}
     return _custom_signal_exprs
@@ -88,7 +88,7 @@ def _get_custom_signal_exprs_today() -> dict[str, pl.Expr]:
             _custom_signal_exprs_today = custom_signals.build_expressions_prev(
                 sigs, prev_fields
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning("custom signals load failed (today): %s", e)
             _custom_signal_exprs_today = {}
             _custom_prev_fields_cache = set()
@@ -294,6 +294,9 @@ def _apply_adj_factor(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
         right_on="trade_date",
         by="symbol",
         strategy="backward",
+        # Both inputs are explicitly sorted by symbol and date above; Polars
+        # cannot re-check grouped sortedness and emits a noisy false-positive.
+        check_sortedness=False,
     )
 
     # 补充 total_factor + 前复权 + 除权标记,一次 with_columns 完成
@@ -852,7 +855,7 @@ def compute_limit_signals(
 
     # 生效涨跌停价: 维表日期与行情日期一致时使用权威值, 否则使用理论价。
     # 旧版维表没有 as_of, 保持仅在最新行情日使用权威值的兼容行为。
-    _SENTINEL = 10000.0
+    _SENTINEL = 10000.0  # noqa: N806
     if "_instrument_as_of" in df.columns:
         authoritative_date = (
             pl.col("_instrument_as_of") == pl.col("date").cast(pl.Date, strict=False)
@@ -1414,7 +1417,7 @@ def _total_ram_bytes() -> int | None:
     try:
         from app.services.memory_budget import memory_budget
         return memory_budget().total_bytes
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -1700,7 +1703,7 @@ def _run_pipeline_impl(data_dir: Path | None = None,
             raw_new = scan_daily_parquet(new_date_dirs[0] / "*.parquet", cast_options=_cast)
             for nd in new_date_dirs[1:]:
                 raw_new = pl.concat([raw_new, scan_daily_parquet(nd / "*.parquet", cast_options=_cast)], how="diagonal_relaxed")
-            raw_new = raw_new.sort(["symbol", "date"]).collect(streaming=True)
+            raw_new = raw_new.sort(["symbol", "date"]).collect(engine="streaming")
 
             # 增量模式: 只算新日期, 但指标需要历史窗口
             # 读已有 enriched 最近 60 天作为历史前缀
@@ -1755,7 +1758,7 @@ def _run_pipeline_impl(data_dir: Path | None = None,
             sym_set = set(symbols)
             raw_sym = scan_daily_parquet(daily_glob, cast_options=_cast).sort(["symbol", "date"])
             raw_sym = raw_sym.filter(pl.col("symbol").is_in(list(sym_set)))
-            raw_sym = raw_sym.collect(streaming=True)
+            raw_sym = raw_sym.collect(engine="streaming")
             if not raw_sym.is_empty():
                 factors_sym = factors.filter(pl.col("symbol").is_in(list(sym_set))) if not factors.is_empty() else factors
                 inst_sym = instruments.filter(pl.col("symbol").is_in(list(sym_set))) if not instruments.is_empty() else instruments
@@ -1807,7 +1810,7 @@ def _run_pipeline_impl(data_dir: Path | None = None,
 
     all_symbols = (
         lf_all.select("symbol").unique().sort("symbol")
-        .collect(streaming=True)["symbol"].to_list()
+        .collect(engine="streaming")["symbol"].to_list()
     )
     if not all_symbols:
         logger.info("无日K数据, 跳过管道")
@@ -1825,9 +1828,9 @@ def _run_pipeline_impl(data_dir: Path | None = None,
     from app.services import preferences as prefs_mod
     # 自适应批次 (#208): 单批体积按目标行数恒定, 与总历史长度解耦;
     # 小内存机器自动收缩, 大内存机器保持用户设置
-    total_rows = lf_all.select(pl.len()).collect(streaming=True).item()
+    total_rows = lf_all.select(pl.len()).collect(engine="streaming").item()
     rows_per_sym = max(1, -(-int(total_rows) // total_syms))
-    SYM_BATCH = _adaptive_sym_batch(prefs_mod.get_enriched_batch_size(), rows_per_sym)
+    SYM_BATCH = _adaptive_sym_batch(prefs_mod.get_enriched_batch_size(), rows_per_sym)  # noqa: N806
     total_batches = (total_syms + SYM_BATCH - 1) // SYM_BATCH
     logger.info("全量计算: %d 只标的 (%d 行, ~%d 行/只), symbol 分批 %d 只/批, %d 批 [%s]",
                 total_syms, total_rows, rows_per_sym, SYM_BATCH, total_batches, mode)
@@ -1849,7 +1852,7 @@ def _run_pipeline_impl(data_dir: Path | None = None,
             # 只读取本批 symbol 的数据
             lf_batch = scan_daily_parquet(daily_files, cast_options=_cast)
             lf_batch = lf_batch.filter(pl.col("symbol").is_in(batch_syms))
-            raw = lf_batch.sort(["symbol", "date"]).collect(streaming=True)
+            raw = lf_batch.sort(["symbol", "date"]).collect(engine="streaming")
 
             if raw.is_empty():
                 continue
@@ -1963,7 +1966,7 @@ def _run_pipeline_impl(data_dir: Path | None = None,
                     scan_enriched_parquet(staging_files)
                     .filter((pl.col("date") >= lo) & (pl.col("date") <= hi))
                     .sort(["date", "symbol"])
-                    .collect(streaming=True)
+                    .collect(engine="streaming")
                 )
                 for date_df in block.partition_by("date"):
                     ds = date_df["date"][0]
@@ -2018,9 +2021,10 @@ def _load_recent_history(enriched_base: Path, symbols: list[str], days: int) -> 
             )
             .sort(["symbol", "date"])
         )
+        schema = lf.collect_schema()
         hist_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
                                  "volume", "amount", "raw_close", "raw_high", "raw_low"]
-                    if c in lf.schema]
+                    if c in schema]
         return lf.select(hist_cols).collect()
     except Exception as e:  # noqa: BLE001
         logger.warning("历史数据加载失败: %s", e)
@@ -2212,7 +2216,7 @@ def compute_enriched_today(
     # _vol_ma5_prev_sum 是前5个交易日成交量之和(tail(5)), 不含当天
     # 盘中 volume 是部分量, 按 elapsed_minutes 折算到全天量级
     vol_ma5_prev = pl.col("_vol_ma5_prev_sum") / 5  # 前5日均量(不含当天)
-    if elapsed_minutes and elapsed_minutes > 0:
+    if elapsed_minutes and elapsed_minutes > 0:  # noqa: SIM108
         time_factor = 240.0 / elapsed_minutes  # 盘中折算: 部分量 → 全天量级
     else:
         time_factor = 1.0  # 盘后/无效时间: 不折算(此时 volume 已是全天量)
@@ -2378,7 +2382,7 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
     df = df.join(inst_subset, on="symbol", how="left", suffix="_inst")
 
     # 换手率: API 有则直接用, 无则从 float_shares 计算
-    if "turnover_rate" not in df.columns:
+    if "turnover_rate" not in df.columns:  # noqa: SIM102
         if "float_shares" in df.columns and "volume" in df.columns:
             df = df.with_columns(
                 pl.when(pl.col("float_shares") > 0)
@@ -2412,7 +2416,7 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
     # 生效涨跌停价: 维表日期与行情日期一致时优先使用交易所权威值;
     # 维表过期或价格缺失时回退自算理论价。旧版无 as_of 维表保持兼容。
     # 哨兵阈值 10000 用于识别 "新股无涨跌停限制" 的占位值 (实际涨停价不可能上万)。
-    _SENTINEL = 10000.0
+    _SENTINEL = 10000.0  # noqa: N806
     authoritative_date = (
         pl.col("_instrument_as_of") == trade_date.cast(pl.Date, strict=False)
         if "_instrument_as_of" in df.columns

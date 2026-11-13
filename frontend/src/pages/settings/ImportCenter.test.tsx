@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { SettingsImportCenterPanel } from './ImportCenter'
+import { waitForAct } from '@/test/actWait'
 
 const mocks = vi.hoisted(() => ({
   inspect: vi.fn(), install: vi.fn(), backup: vi.fn(), resources: vi.fn(), source: vi.fn(),
@@ -41,7 +42,7 @@ async function click(el: HTMLElement) { expect(el).toBeTruthy(); await act(async
 async function render(url = '/settings?tab=import') {
   qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   root = createRoot(node)
-  await act(async () => root.render(<MemoryRouter initialEntries={[url]}><QueryClientProvider client={qc}><SettingsImportCenterPanel /></QueryClientProvider></MemoryRouter>))
+  await act(async () => root.render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={[url]}><QueryClientProvider client={qc}><SettingsImportCenterPanel /></QueryClientProvider></MemoryRouter>))
 }
 async function pick(filename = 'extension.zip') {
   const input = node.querySelector<HTMLInputElement>('input[type="file"]')!
@@ -142,8 +143,7 @@ it('failed version and rollback target are explicit; management uses the display
   mocks.packages.mockResolvedValue([{ id: 'demo.backend', name: '研究服务', version: '2.0.0', previous_version: '1.0.0', runtime_version: '2.0.0',
     failed_version: '3.0.0', enabled: true, status: '启动失败 · 保留原版', error: '失败', revision: 'state-2' }])
   await render('/settings?tab=import&view=installed&selected=extension%3Ademo.backend')
-  await vi.waitFor(async () => {
-    await act(async () => {})
+  await waitForAct(async () => {
     expect(node.textContent).toContain('版本 3.0.0 启动失败；当前仍运行 2.0.0')
   })
   await click(button('回退到 1.0.0'))
@@ -167,7 +167,7 @@ it('opens the first extension by default and shows its full detail', async () =>
   mocks.packages.mockResolvedValue([{ id: 'demo.backend', name: '研究服务', version: '1.0.0',
     enabled: true, status: '已启用', revision: 'r' }])
   await render('/settings?tab=import&view=installed')
-  await vi.waitFor(() => {
+  await waitForAct(() => {
     expect(node.querySelector('button[aria-pressed="true"]')?.textContent).toBe('已安装扩展')
     expect(button('停用扩展')).toBeTruthy()
   })
@@ -184,7 +184,7 @@ it.each([
     available: false, status: '待重启卸载', description: '' }
   mocks.sources.mockResolvedValue({ plugins: [source] })
   await render('/settings?tab=import&view=installed&selected=source%3Aamber')
-  await vi.waitFor(() => expect(node.querySelector('[data-extension-detail] h3')?.textContent).toContain('Amber'))
+  await waitForAct(() => expect(node.querySelector('[data-extension-detail] h3')?.textContent).toContain('Amber'))
   expect(node.querySelector('[data-key-config]')).toBeNull()
 })
 
@@ -198,8 +198,7 @@ it('shows Markdown instructions and custom links even for a disabled source with
     key_manage_url: 'https://example.com/account', key_manage_label: '获取个人 Key',
   }] })
   await render('/settings?tab=import&view=installed&selected=source%3Ademo')
-  await vi.waitFor(async () => {
-    await act(async () => {})
+  await waitForAct(async () => {
     expect(node.querySelector('[data-extension-detail] strong')?.textContent).toBe('个人账户')
   })
   const detail = node.querySelector('[data-extension-detail]')!
@@ -212,7 +211,7 @@ it('associates runtime loading errors with their page instead of showing it as e
   mocks.pages.mockResolvedValue([{ id: 'abnormal', label: '异动监控', enabled: true }])
   mocks.loadErrors.mockReturnValue([{ source: 'runtime:abnormal', error: '扩展 ID 重复: official.abnormal' }])
   await render('/settings?tab=import&view=installed&selected=page%3Aabnormal')
-  await vi.waitFor(() => {
+  await waitForAct(() => {
     const entry = node.querySelector('nav[aria-label="已安装扩展列表"] button')
     expect(entry?.textContent).toContain('加载失败')
     expect(entry?.textContent).not.toContain('已启用')

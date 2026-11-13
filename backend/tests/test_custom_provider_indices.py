@@ -217,7 +217,6 @@ def _injection_env(monkeypatch, *, healthy, local_df, asset_type="stock", symbol
     api_calls: list[list[str]] = []
     monkeypatch.setattr(
         qsm, "_noop", qsm.__dict__.get("_noop", None), raising=False)  # 占位无操作
-    from app.services.kline_sync import intraday_monitor_support
     monkeypatch.setattr(
         "app.services.quote_service.logger", qsm.logger, raising=False)
     # 打桩 API 拉取路径 (健康时不应被调)
@@ -255,7 +254,7 @@ def test_intraday_signals_read_local_when_healthy(monkeypatch):
 
 def test_intraday_signals_fall_back_to_api_when_unhealthy(monkeypatch):
     """不健康 (服务关/挂) 时回落原 API 拉取路径。"""
-    service, engine, api_calls, captured = _injection_env(monkeypatch, healthy=False, local_df=pl.DataFrame())
+    service, engine, api_calls, _captured = _injection_env(monkeypatch, healthy=False, local_df=pl.DataFrame())
     enriched = pl.DataFrame({"symbol": ["600519.SH"], "close": [100.5]})
     service._inject_intraday_signals(enriched, engine, asset_type="stock")
     assert api_calls == [["600519.SH"]]  # 走了 API
@@ -263,7 +262,7 @@ def test_intraday_signals_fall_back_to_api_when_unhealthy(monkeypatch):
 
 def test_intraday_signals_etf_never_reads_local(monkeypatch):
     """ETF 不在全量分钟 universe: 即使健康也走 API 路径。"""
-    service, engine, api_calls, captured = _injection_env(
+    service, engine, api_calls, _captured = _injection_env(
         monkeypatch, healthy=True, local_df=pl.DataFrame(), asset_type="etf", symbols={"510300.SH"})
     enriched = pl.DataFrame({"symbol": ["510300.SH"], "close": [4.0]})
     service._inject_intraday_signals(enriched, engine, asset_type="etf")

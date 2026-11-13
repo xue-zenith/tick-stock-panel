@@ -75,7 +75,7 @@ def _ensure_data_dir_writable() -> None:
         probe = data_root / ".write_probe"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink(missing_ok=True)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.error("数据目录不可写, 桌面版无法运行: %s (%s)", data_root, e)
         raise
 
@@ -175,7 +175,6 @@ def _guard_streams() -> None:
     修法: console=False 下把 stdout/stderr 换成丢弃写入的空对象 (devnull),
     让 logging / reconfigure / 任何 print 都安全落地。console=True 不动 (有真控制台)。
     """
-    import os
 
     class _NullStream:
         """丢弃所有写入的空流 (替代 None 的 stdout/stderr)。"""
@@ -237,8 +236,8 @@ def _pid_alive(pid: int) -> bool:
         # 正在运行的实例 (例如探测子进程重启自身时)。
         import ctypes
 
-        STILL_ACTIVE = 259
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259  # noqa: N806
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000  # noqa: N806
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
         handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
@@ -333,8 +332,8 @@ def _wait_for_server(
     调用方抛异常, 只表现为 server.run() 正常返回) —— 此时不可能出现就绪,
     立即返回 False, 不再傻等满 timeout 把「启动失败」伪装成「超时」。
     """
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     url = f"http://127.0.0.1:{port}/health"
     deadline = time.monotonic() + timeout

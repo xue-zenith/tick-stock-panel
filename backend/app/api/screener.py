@@ -7,11 +7,10 @@ import glob as _glob
 import logging
 import math
 import os
-import re
 import time
 from dataclasses import asdict, replace
 from datetime import date, datetime
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -37,19 +36,19 @@ def _admit_submission(request: Request) -> None:
 
 class CustomRequest(BaseModel):
     conditions: list[str]
-    order_by: Optional[str] = None
+    order_by: str | None = None
     limit: int = 30
-    pool: Optional[list[str]] = None
-    as_of: Optional[date] = None
-    ext_columns: Optional[str] = None
+    pool: list[str] | None = None
+    as_of: date | None = None
+    ext_columns: str | None = None
     asset_type: str = "stock"
 
 
 class PresetRequest(BaseModel):
     strategy_id: str
-    pool: Optional[list[str]] = None
-    as_of: Optional[date] = None
-    ext_columns: Optional[str] = None
+    pool: list[str] | None = None
+    as_of: date | None = None
+    ext_columns: str | None = None
     asset_type: str = "stock"
     timeframe: str = "1d"
     ensure: bool = False
@@ -82,7 +81,7 @@ def _coverage_warnings(
         cw = getattr(svc, "coverage_warnings", None)
         if callable(cw):
             return cw(as_of, required_bars=required)
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.debug("coverage warnings unavailable", exc_info=True)
     return []
 
@@ -123,7 +122,7 @@ def _safe_ext_value(value: Any) -> Any:
 _ext_value_map_cache: dict[tuple[str, str, str], tuple[Any, dict[str, Any]]] = {}
 
 
-def _ext_parquet_signature(cfg, data_dir) -> Optional[tuple]:
+def _ext_parquet_signature(cfg, data_dir) -> tuple | None:
     """该扩展配置底层 parquet 文件的 (路径, mtime) 签名; 出错返回 None (禁用缓存)。"""
     try:
         from app.api.ext_data import _parquet_glob
@@ -137,7 +136,7 @@ def _ext_parquet_signature(cfg, data_dir) -> Optional[tuple]:
 
 
 def _load_ext_value_maps(
-    repo, ext_columns: Optional[str], as_of: Optional[str] = None
+    repo, ext_columns: str | None, as_of: str | None = None
 ) -> dict[str, dict[str, Any]]:
     """按请求加载扩展列，返回 {输出列名: {symbol: value}}。
 
@@ -216,8 +215,8 @@ def _load_ext_value_maps(
 
 
 def _ext_maps_for_dates(
-    repo, ext_columns: Optional[str], dates
-) -> dict[Optional[str], dict[str, dict[str, Any]]]:
+    repo, ext_columns: str | None, dates
+) -> dict[str | None, dict[str, dict[str, Any]]]:
     """按日期集合构建多份 ext 投影映射 (缓存 payload 的结果/今日曾命中可能跨日)。
 
     无 ext_columns 时返回 {} (调用方视为"无投影")。None 键 = 无日期结果, 取最新分区。
@@ -229,13 +228,13 @@ def _ext_maps_for_dates(
 
 
 def _maps_for_date(
-    maps_by_date: dict[Optional[str], dict[str, dict[str, Any]]], date
+    maps_by_date: dict[str | None, dict[str, dict[str, Any]]], date
 ) -> dict[str, dict[str, Any]]:
     key = str(date) if date else None
     return maps_by_date.get(key) or maps_by_date.get(None) or {}
 
 
-def _row_with_ext(row: dict, ext_values: dict[str, dict[str, Any]], symbol: Optional[str] = None) -> dict:
+def _row_with_ext(row: dict, ext_values: dict[str, dict[str, Any]], symbol: str | None = None) -> dict:
     next_row = dict(row)
     sym = symbol or next_row.get("symbol")
     for out_col, value_map in ext_values.items():
@@ -262,7 +261,7 @@ def _results_with_ext(results: dict[str, dict], ext_values: dict[str, dict[str, 
 
 
 def _cache_payload_with_ext(
-    cached: dict, maps_by_date: dict[Optional[str], dict[str, dict[str, Any]]]
+    cached: dict, maps_by_date: dict[str | None, dict[str, dict[str, Any]]]
 ) -> dict:
     """把 ext 投影按各自日期合并进缓存 payload (结果行与今日曾命中行各用其 date)。"""
     if not maps_by_date:
@@ -600,7 +599,7 @@ def _cached_with_realtime(request: Request) -> dict:
 @router.get("/cached")
 def get_cached(
     request: Request,
-    ext_columns: Optional[str] = Query(None, description="逗号分隔: config_id.field_name"),
+    ext_columns: str | None = Query(None, description="逗号分隔: config_id.field_name"),
 ):
     """读取策略结果缓存, 并叠加监控引擎本轮实时算出的结果。
 
@@ -696,7 +695,7 @@ def get_cached_summary(request: Request, task_id: str | None = None):
 def get_cached_result(
     strategy_id: str,
     request: Request,
-    ext_columns: Optional[str] = Query(None, description="逗号分隔: config_id.field_name"),
+    ext_columns: str | None = Query(None, description="逗号分隔: config_id.field_name"),
 ):
     """按需返回单个策略的完整明细及其今日失效行。
 
@@ -871,7 +870,7 @@ def _run_all_progressive(
                     (identity, asset_type, timeframe, str(as_of), sid, version),
                     compute, ttl_s=6 if ensure else 0,
                 ))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning("run_all: 策略 %s 执行失败, 跳过: %s", sid, e, exc_info=True)
                 handle.fail_one(sid, str(e))
                 continue
@@ -945,7 +944,7 @@ def _run_all_progressive(
 
 
 @router.post("/run_all")
-def run_all(request: Request, body: Optional[dict] = None):
+def run_all(request: Request, body: dict | None = None):
     """批量运行指定策略；注册、路由和执行均由 StrategyEngine 负责。"""
     from datetime import date as date_type
 
@@ -1119,9 +1118,9 @@ def run_all(request: Request, body: Optional[dict] = None):
 @router.get("/limit-ladder")
 def limit_ladder(
     request: Request,
-    as_of: Optional[date] = None,
+    as_of: date | None = None,
     direction: str = Query("up", description="up=涨停梯队 | down=跌停梯队"),
-    ext_columns: Optional[str] = Query(None, description="逗号分隔: config_id.field_name"),
+    ext_columns: str | None = Query(None, description="逗号分隔: config_id.field_name"),
 ):
     """连板/连跌梯队 — 按连板数分组, 含三状态。
     返回: tiers = [{ boards, count, stocks: [{symbol,name,change_pct,status,...}] }]
@@ -1263,7 +1262,7 @@ def limit_ladder(
                         & (pl.col("_sealed") == True)  # noqa: E712
                     ).then(pl.lit("real"))
                     .when(
-                        (pl.col("_sealed") == False)  # noqa: E712
+                        pl.col("_sealed") == False  # noqa: E712
                     ).then(pl.lit("fake"))
                     .when(
                         (pl.col("status") == status_main)
@@ -1335,7 +1334,7 @@ def limit_ladder(
                 if joined is not None:
                     df = df.join(joined, on="symbol", how="left")
                     ext_col_names.append(ext_col_name)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 cfg = configs.get(config_id)
                 if cfg:
                     try:
@@ -1345,11 +1344,11 @@ def limit_ladder(
                         if joined is not None:
                             df = df.join(joined, on="symbol", how="left")
                             ext_col_names.append(ext_col_name)
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         pass
 
     # 选择输出列
-    cols = ["symbol", "name", "close", "change_pct", "boards", "status", consec_col, "sealed_status", "sealed_vol", "is_one_word"] + ext_col_names
+    cols = ["symbol", "name", "close", "change_pct", "boards", "status", consec_col, "sealed_status", "sealed_vol", "is_one_word", *ext_col_names]
     df = df.select([c for c in cols if c in df.columns])
     # 排序: boards 降序, status 按主状态→炸/翘→断/止
     status_order = pl.when(pl.col("status") == status_main).then(0)

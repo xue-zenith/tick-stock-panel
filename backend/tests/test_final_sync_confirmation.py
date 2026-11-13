@@ -10,7 +10,8 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, time as dt_time
+from datetime import datetime
+from datetime import time as dt_time
 
 import pytest
 

@@ -61,7 +61,7 @@ afterEach(async () => {
 })
 
 async function render(hasCap = true) {
-  await act(async () => root.render(<MemoryRouter><QueryClientProvider client={client}>
+  await act(async () => root.render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={client}>
     <MinuteSyncConfig hasCap={hasCap} onJobStart={onJobStart} />
   </QueryClientProvider></MemoryRouter>))
   await settle()

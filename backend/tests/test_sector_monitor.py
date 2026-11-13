@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
-from app.services import sector_monitor
 from app.services.ext_data import ExtConfig, ExtConfigStore, ExtField
 from app.services.sector_monitor import SectorMonitorService
 from app.strategy import monitor_rules

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import {
@@ -429,7 +429,7 @@ export function MiningWorkbench() {
       return
     }
     tryReconnectMining()
-  }, [runFromUrl, searchParams, setSearchParams, task.runId])
+  }, [runFromUrl, searchParams, setSearchParams, task.runId, task.isPending])
 
   const currentResult = task.runId
     && (!runFromUrl || runFromUrl === task.runId)
@@ -450,7 +450,7 @@ export function MiningWorkbench() {
     )
   )
   const result = currentResult ?? (showingPrevious ? task.previousResult : null)
-  const candidates = result?.candidates ?? []
+  const candidates = useMemo(() => result?.candidates ?? [], [result?.candidates])
   const activeCandidate = candidates.find(item => item.signature === selectedCandidate) ?? candidates[0] ?? null
   const candidateFolds = activeCandidate?.folds?.length ? activeCandidate.folds : result?.folds ?? []
   const correlation = useMemo(() => {
@@ -468,26 +468,26 @@ export function MiningWorkbench() {
     }
   }, [result, correlationScope])
 
-  const setSelectedCandidate = (signature: string) => {
+  const setSelectedCandidate = useCallback((signature: string) => {
     const params = new URLSearchParams(searchParams)
     if (signature) params.set('candidate', signature)
     else params.delete('candidate')
     setSearchParams(params, { replace: true })
-  }
+  }, [searchParams, setSearchParams])
 
   useEffect(() => {
     if (!selectedCandidate && candidates[0]) setSelectedCandidate(candidates[0].signature)
     if (selectedCandidate && candidates.length && !candidates.some(item => item.signature === selectedCandidate)) {
       setSelectedCandidate(candidates[0]?.signature || '')
     }
-  }, [candidates, selectedCandidate])
+  }, [candidates, selectedCandidate, setSelectedCandidate])
 
   const factorGroups = useMemo(() => {
     const groups: Record<string, FactorColumn[]> = {}
     for (const item of factorQuery.data?.columns ?? []) (groups[item.group] ??= []).push(item)
     return groups
   }, [factorQuery.data])
-  const strategies = strategyQuery.data?.strategies.filter(item => item.execution_backend === 'matrix_native') ?? []
+  const strategies = useMemo(() => strategyQuery.data?.strategies.filter(item => item.execution_backend === 'matrix_native') ?? [], [strategyQuery.data?.strategies])
 
   useEffect(() => {
     if (!strategyQuery.data) return
@@ -496,7 +496,7 @@ export function MiningWorkbench() {
       const strategyIds = current.strategyIds.filter(id => compatibleIds.has(id))
       return strategyIds.length === current.strategyIds.length ? current : { ...current, strategyIds }
     })
-  }, [strategyQuery.data])
+  }, [strategyQuery.data, strategies])
 
   const updateDraft = <K extends keyof MiningDraft>(key: K, value: MiningDraft[K]) => {
     setDraft(current => ({ ...current, [key]: value }))

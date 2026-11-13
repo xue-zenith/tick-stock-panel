@@ -6,8 +6,6 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import polars as pl
-
 from app.services import kline_sync
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 

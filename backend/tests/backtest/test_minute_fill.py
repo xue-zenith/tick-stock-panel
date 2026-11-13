@@ -179,7 +179,7 @@ class _FakeRepo:
     def __init__(self, df: pl.DataFrame) -> None:
         self._df = df
 
-    def get_minute_by_dates(self, symbols, dates, asset_type="stock"):  # noqa: ANN001
+    def get_minute_by_dates(self, symbols, dates, asset_type="stock"):
         return self._df
 
 

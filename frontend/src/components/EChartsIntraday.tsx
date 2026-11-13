@@ -471,7 +471,7 @@ export function EChartsIntraday({
       fullDayToDataIdx.current = new Map()
       chart.clear()
     }
-  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, averageVisible, priceLines, assetType])
+  }, [data, prevClose, avgPrices, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, averageVisible, priceLines, assetType])
 
   useEffect(() => {
     return () => {

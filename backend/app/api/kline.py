@@ -7,14 +7,12 @@ import logging
 import math
 from datetime import date, timedelta
 from functools import lru_cache
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 import anyio
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from app.db_safe import is_valid_ext_ident
-from app.indicators.pipeline import compute_enriched_single
 from app.market_time import cn_now, cn_today, in_continuous_session
 from app.price_limits import (
     is_no_limit_day,
@@ -84,7 +82,7 @@ def _compress_on(pref_key: str) -> bool:
         return False
     try:
         return bool(getter())
-    except Exception:  # 偏好读取异常按不压缩返回原样
+    except Exception:  # 偏好读取异常按不压缩返回原样  # noqa: BLE001
         return False
 
 
@@ -351,7 +349,7 @@ def _get_asset_info(repo, symbol: str, asset_type: str) -> dict:
         if hit.is_empty():
             return {}
         return {"name": hit["name"][0]}
-    except Exception:
+    except Exception:  # noqa: BLE001
         return {}
 
 
@@ -395,7 +393,7 @@ def _get_price_limit_info(
             hit = instruments.filter(pl.col("symbol") == symbol).select(available).head(1)
             if not hit.is_empty():
                 row = hit.to_dicts()[0]
-    except Exception:
+    except Exception:  # noqa: BLE001
         row = None
 
     # 注册制新股上市初期无涨跌幅: listing_date 命中窗口时 no_limit=True,
@@ -448,7 +446,7 @@ def _get_previous_closes(
             end,
             columns=["date", "close"],
         ).sort("date")
-    except Exception:
+    except Exception:  # noqa: BLE001
         daily = None
     if daily is None or daily.is_empty():
         return {trade_date: None for trade_date in trade_dates}
@@ -475,9 +473,9 @@ def get_daily(
     request: Request,
     symbol: str = Query(..., description="标的代码,如 000001.SZ"),
     days: int = Query(120, ge=10, le=2000),
-    start_date: Optional[str] = Query(None, description="起始日期 YYYY-MM-DD, 优先于 days"),
-    end_date: Optional[str] = Query(None, description="截止日期 YYYY-MM-DD, 默认今天"),
-    ext_columns: Optional[str] = Query(None, description="逗号分隔的 ext 列: config_id.field_name"),
+    start_date: str | None = Query(None, description="起始日期 YYYY-MM-DD, 优先于 days"),
+    end_date: str | None = Query(None, description="截止日期 YYYY-MM-DD, 默认今天"),
+    ext_columns: str | None = Query(None, description="逗号分隔的 ext 列: config_id.field_name"),
 ):
     """读取本地 enriched 表中某只股票的日 K。
 
@@ -492,10 +490,7 @@ def get_daily(
     # 未传 end_date 时用北京今天: 实时注入只在内存缓存命中时补当日 K,
     # 缓存冷时 parquet 当日行能否进结果取决于这个窗口右端。
     end = date.fromisoformat(end_date) if end_date else cn_today()
-    if start_date:
-        start = date.fromisoformat(start_date)
-    else:
-        start = end - timedelta(days=days)
+    start = date.fromisoformat(start_date) if start_date else end - timedelta(days=days)
 
     asset_type = repo.resolve_asset_type(symbol)
     stock_info = _get_stock_info(repo, symbol) if asset_type == "stock" else _get_asset_info(repo, symbol, asset_type)
@@ -564,7 +559,7 @@ def _daily_freshness(request: Request, rows: list[dict], end: date) -> dict:
     return QuoteFreshness.for_request(request).describe(rows[-1] if rows else None, historical=end < cn_today())
 
 
-def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> dict:
+def _attach_ext(resp: dict, repo, symbol: str, ext_columns: str | None) -> dict:
     """按 ext_columns 规格为单只股票 LEFT JOIN 扩展数据，平铺到 stock_info['ext']。
 
     key 形如 "{config_id}__{field_name}"，与自选列表 enriched 接口保持一致。
@@ -641,7 +636,7 @@ def _latest_live_candle(
         if not q:
             return None
         q = q[0]
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
     close_price = q.get("close")
@@ -936,7 +931,7 @@ def get_minute_batch(request: Request, body: dict):
     #           与前部的洞 (首根显著晚于开盘 — 盘中重启/停机跨开盘的残留,
     #           连续的尾部K会被增量锚定锁死, 同样必须全天重拉)。
     # - stale:  仅尾部落后 → 增量拉, 请求量从"每轮全天"降为"每轮一根"量级。
-    _LUNCH_GAP_MIN = 91  # 11:30 → 13:01
+    _LUNCH_GAP_MIN = 91  # 11:30 → 13:01  # noqa: N806
     # 前部洞基准: 开盘后 6 分钟 (容许无集合竞价K的数据源)。晚开/停牌复牌的票
     # 也会命中 → 全天拉幂等, 至多多一次批量请求, 与中间洞同一代价模型。
     day_open_floor = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 36, 0)
@@ -1154,7 +1149,7 @@ def get_minute_range(
 def get_minute(
     request: Request,
     symbol: str = Query(..., description="标的代码"),
-    trade_date: date | None = Query(None, alias="date", description="交易日期, 默认最新"),
+    trade_date: date | None = Query(None, alias="date", description="交易日期, 默认最新"),  # noqa: B008
     live: bool = Query(False, description="当日盘中跳过本地优先, 直接实时拉取(个股详情分时轮询用)"),
 ):
     """读取某只股票某天的分钟 K 线。
@@ -1381,7 +1376,7 @@ async def sync_minute(request: Request):
     # 可选 body: { "days": int, "extend": bool }
     # days: 拉取天数; extend: 向前扩展模式 (从最早数据往前补)
     body = {}
-    try:
+    try:  # noqa: SIM105
         body = await request.json()
     except Exception:  # noqa: BLE001
         pass
@@ -1520,7 +1515,7 @@ async def trigger_minute_sync(
         finally:
             release_run_slot(job_id)
 
-    asyncio.create_task(task())
+    asyncio.create_task(task())  # noqa: RUF006
     return {"status": "started", "job_id": job_id}
 
 
@@ -1649,7 +1644,7 @@ async def clear_minute(request: Request):
             # 钉住分区句柄, 导致下方 rmtree 静默删不掉被钉文件
             result = repo.execute_one("SELECT COUNT(*) AS cnt FROM kline_minute")
             removed = result[0] if result else 0
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         # 仅删 kline_minute 目录, 绝不触碰其他目录
         shutil.rmtree(minute_dir, ignore_errors=True)
@@ -1735,7 +1730,7 @@ async def extend_history(request: Request):
             finally:
                 release_run_slot(job_id)
 
-        asyncio.create_task(task())
+        asyncio.create_task(task())  # noqa: RUF006
         return {"status": "started", "job_id": job_id}
     except HTTPException:
         raise
@@ -1765,7 +1760,7 @@ async def repair_daily(request: Request):
         try:
             start_date = _date.fromisoformat(str(raw))
         except ValueError:
-            raise HTTPException(status_code=400, detail="start_date 格式错误 (应为 YYYY-MM-DD)")
+            raise HTTPException(status_code=400, detail="start_date 格式错误 (应为 YYYY-MM-DD)")  # noqa: B904
 
         if start_date > cn_today():
             raise HTTPException(status_code=400, detail="起始日期不能晚于今天")
@@ -1827,7 +1822,7 @@ async def repair_daily(request: Request):
             finally:
                 release_run_slot(job_id)
 
-        asyncio.create_task(task())
+        asyncio.create_task(task())  # noqa: RUF006
         return {"status": "started", "job_id": job_id}
     except HTTPException:
         raise
@@ -1922,7 +1917,7 @@ async def rebuild_enriched(request: Request):
             finally:
                 release_run_slot(job_id)
 
-        asyncio.create_task(task())
+        asyncio.create_task(task())  # noqa: RUF006
         return {"status": "started", "job_id": job_id}
     except Exception as e:
         import traceback as _tb
@@ -1931,6 +1926,6 @@ async def rebuild_enriched(request: Request):
 
 
 # 长时间任务专用线程池（隔离于 FastAPI 默认线程池，防止阻塞请求处理）
-import concurrent.futures as _cf
+import concurrent.futures as _cf  # noqa: E402
 
 _long_task_executor = _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="long-task")

@@ -108,7 +108,7 @@ def test_explicit_history_date_uses_cache(data_dir, monkeypatch):
 
 
 def test_failure_falls_back_to_prev(data_dir, monkeypatch):
-    provider = _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28"}))
+    _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28"}))
     out = ab.get_auction_benchmark(data_dir, date(2026, 8, 28))
     assert out["state"] == "fallback_prev"
     assert out["trade_date"] == "2026-08-27"

@@ -178,12 +178,12 @@ def _pivot_points(df: pl.DataFrame) -> list[dict]:
         return []
     last = df.tail(1)
     h = last["high"][0]
-    l = last["low"][0]
+    l = last["low"][0]  # noqa: E741
     c = last["close"][0]
     if not _ok(h) or not _ok(l) or not _ok(c):
         return []
 
-    h, l, c = float(h), float(l), float(c)
+    h, l, c = float(h), float(l), float(c)  # noqa: E741
     p = (h + l + c) / 3
     r1 = 2 * p - l
     s1 = 2 * p - h
@@ -499,7 +499,7 @@ def _fibonacci_levels(df: pl.DataFrame, window: int = 120) -> list[dict]:
     # 判断波段方向:高点在低点之后 = 上涨波段(从低回撤)
     up_trend = hi_pos > lo_pos
     for r in ratios:
-        if up_trend:
+        if up_trend:  # noqa: SIM108
             val = hi_val - rng * r          # 从高点向下回撤
         else:
             val = lo_val + rng * r          # 从低点向上回撤

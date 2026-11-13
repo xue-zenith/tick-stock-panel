@@ -15,14 +15,11 @@ import {
 } from 'echarts/charts'
 import {
   DataZoomComponent,
-  DatasetComponent,
   GridComponent,
   LegendComponent,
   MarkLineComponent,
   MarkPointComponent,
-  TitleComponent,
   TooltipComponent,
-  TransformComponent,
   VisualMapComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
@@ -35,14 +32,11 @@ echarts.use([
   LineChart,
   PieChart,
   DataZoomComponent,
-  DatasetComponent,
   GridComponent,
   LegendComponent,
   MarkLineComponent,
   MarkPointComponent,
-  TitleComponent,
   TooltipComponent,
-  TransformComponent,
   VisualMapComponent,
   CanvasRenderer,
 ])

@@ -23,14 +23,16 @@ export function useMinuteBatchQuery(
     refetchInterval: options.refetchInterval,
   })
 
+  const { isFetching, refetch } = query
+
   useEffect(() => {
     // The cache stays shared and bounded, but changing queryFn alone does not
     // load a new list. Finish existing work, then fetch the latest scope once;
     // genuine empty responses and failures must not cause a request loop.
-    if (enabled && !query.isFetching && fetchedScope.current !== scope) {
-      void query.refetch()
+    if (enabled && !isFetching && fetchedScope.current !== scope) {
+      void refetch()
     }
-  }, [enabled, scope, query.isFetching, query.refetch])
+  }, [enabled, scope, isFetching, refetch])
 
   return query
 }

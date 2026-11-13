@@ -399,7 +399,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
   const data = rotationQuery.data
   // 编辑器展示名单: 未自定义时用后端内置名单预填 (响应缺省时为空)
   const effectiveExclude = excludeNames ?? (data?.default_exclude_sectors ?? [])
-  const displayNames = data?.series?.sectors ?? []
+  const displayNames = useMemo(() => data?.series?.sectors ?? [], [data?.series?.sectors])
   const maxHeatRows = rowsMode === 'custom' ? MAX_CUSTOM_SECTORS : Math.max(HEAT_ROWS, autoRows)
   const heatRows = Math.min(maxHeatRows, displayNames.length)
   const heatNames = displayNames.slice(0, heatRows)
@@ -469,7 +469,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
   }, [data, indexLabel, indexMinuteQuery.data, indexDailyQuery.data])
 
   // 两图共享同一 x 轴窗口 (1 分钟桶只看最近 60 列), 经 echarts.connect 联动指针
-  const timeline = data?.timeline ?? []
+  const timeline = useMemo(() => data?.timeline ?? [], [data?.timeline])
   const total = timeline.length
   const startCol = bucket === 1 ? Math.max(0, total - HEAT_COLS_1M) : 0
   const cols = Math.max(0, total - startCol)
@@ -737,7 +737,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
         emphasis: { itemStyle: { borderColor: '#fbbf24', borderWidth: 2 } },
       }],
     }
-  }, [data, bucket, chartTheme, phase, startCol, cols, displayNames, heatRows])
+  }, [data, chartTheme, phase, startCol, cols, displayNames, heatRows])
   const heat = useEChart(heatOption, {
     onMouseOver: (params) => {
       if (params.seriesType !== 'heatmap') return
@@ -929,7 +929,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
         }] : []),
       ],
     }
-  }, [data, dimLabel, indexLine, timeline, startCol, cols, phase, chartTheme, bucket])
+  }, [dimLabel, indexLine, timeline, startCol, cols, phase, chartTheme, bucket])
   const chart = useEChart(chartOption)
 
   // 强度图与展示图 x 轴指针跨实例联动 (两图 x 轴窗口一致才可对齐)

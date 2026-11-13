@@ -77,7 +77,7 @@ class TickFlowProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: AssetType,  # noqa: ARG002
+        asset_type: AssetType,
     ) -> pl.DataFrame:
         if not symbols:
             return pl.DataFrame()
@@ -117,7 +117,7 @@ class TickFlowProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: AssetType,  # noqa: ARG002
+        asset_type: AssetType,
     ) -> pl.DataFrame:
         if not symbols:
             return pl.DataFrame()

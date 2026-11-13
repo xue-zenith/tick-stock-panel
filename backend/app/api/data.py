@@ -493,7 +493,7 @@ def _safe_aggregate_financials(repo) -> dict | None:
                 symbols = df["symbol"].n_unique() if not df.is_empty() else 0
                 tables_info[table] = {"rows": rows, "symbols": symbols}
                 total_rows += rows
-            except Exception:
+            except Exception:  # noqa: BLE001
                 tables_info[table] = {"rows": 0, "symbols": 0}
         else:
             tables_info[table] = {"rows": 0, "symbols": 0}
@@ -519,10 +519,8 @@ def _scan_dir_stats(dirpath: Path) -> tuple[int, float]:
             count += c
             total += s
         elif entry.is_file(follow_symlinks=False):
-            try:
+            with contextlib.suppress(OSError):
                 total += entry.stat().st_size
-            except OSError:
-                pass
             count += 1
     return count, round(total / 1048576, 2)
 
@@ -538,10 +536,8 @@ def _scan_dir_recursive(entry: os.DirEntry) -> tuple[int, int]:
                 count += c
                 total += s
             elif sub.is_file(follow_symlinks=False):
-                try:
+                with contextlib.suppress(OSError):
                     total += sub.stat().st_size
-                except OSError:
-                    pass
                 count += 1
     except PermissionError:
         pass
@@ -594,10 +590,8 @@ def _compute_storage(data_dir: Path) -> dict:
     # 根目录散文件
     for entry in os.scandir(data_dir):
         if entry.is_file(follow_symlinks=False):
-            try:
+            with contextlib.suppress(OSError):
                 total_size += entry.stat().st_size / 1048576
-            except OSError:
-                pass
     stats["total_size_mb"] = round(total_size, 2)
     return stats
 

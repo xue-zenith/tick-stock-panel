@@ -441,7 +441,8 @@ def test_system_notifications_delivered_off_calling_thread(monkeypatch):
     """
     import threading
 
-    from app.services import preferences, quote_service as qs_mod
+    from app.services import preferences
+    from app.services import quote_service as qs_mod
 
     monkeypatch.setattr(preferences, "get_system_notify_enabled", lambda: True)
 

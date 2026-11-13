@@ -40,7 +40,7 @@ export function MinuteGapPanel({ hasCap = true, onJobStart }: { hasCap?: boolean
     onSettled: () => setBusySymbol(null),
   })
 
-  const all = gaps.data?.gaps ?? []
+  const all = useMemo(() => gaps.data?.gaps ?? [], [gaps.data?.gaps])
   const filtered = useMemo(() => {
     const kw = filter.trim().toUpperCase()
     return kw ? all.filter(g => g.symbol.toUpperCase().includes(kw) || g.date.includes(kw)) : all

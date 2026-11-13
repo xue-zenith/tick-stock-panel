@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, afterEach, expect, it, vi } from 'vitest'
 import { InstallDialog, PackageActions, PackageInstaller } from './extension'
 import type { PluginDataSourceItem } from '@/lib/api'
+import { waitForAct } from '@/test/actWait'
 
 const mocks = vi.hoisted(() => ({ inspect: vi.fn(), install: vi.fn(), manage: vi.fn(), route: vi.fn(), matrix: vi.fn(), toast: vi.fn(), close: vi.fn(), done: vi.fn(), refresh: vi.fn() }))
 vi.mock('@/lib/api', () => ({ api: { inspectSourcePackage: mocks.inspect, installSourcePackage: mocks.install, manageSourcePackage: mocks.manage, updateDataProviders: mocks.route, capabilityMatrix: mocks.matrix } }))
@@ -19,7 +20,7 @@ const preview = { manifest: { name: 'demo', display_name: '演示源', version: 
 async function render(element = <InstallDialog onClose={mocks.close} onInstalled={mocks.done} />) {
   root = createRoot(node)
   qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  await act(async () => root.render(<MemoryRouter><QueryClientProvider client={qc}>{element}</QueryClientProvider></MemoryRouter>))
+  await act(async () => root.render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={qc}>{element}</QueryClientProvider></MemoryRouter>))
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)) })
 }
 const button = (label: string) => [...node.querySelectorAll('button')].find(el => el.textContent === label)!
@@ -123,12 +124,12 @@ it('blocks confirmation until the routing check succeeds and supports retry', as
   await render(<PackageActions plugin={amberPlugin} refresh={mocks.refresh} />)
   mocks.matrix.mockRejectedValue(new Error('network unavailable'))
   await click(button('卸载插件'))
-  await vi.waitFor(() => expect(node.querySelector('[role="alert"]')?.textContent).toContain('无法读取'))
+  await waitForAct(() => expect(node.querySelector('[role="alert"]')?.textContent).toContain('无法读取'))
   expect(button('确认卸载').disabled).toBe(true)
   expect(mocks.manage).not.toHaveBeenCalled()
   mocks.matrix.mockResolvedValue({ capabilities: [] })
   await click(button('重新读取能力'))
-  await vi.waitFor(() => expect(button('确认卸载').disabled).toBe(false))
+  await waitForAct(() => expect(button('确认卸载').disabled).toBe(false))
   expect(node.querySelector('[role="dialog"]')?.textContent).toContain('可直接卸载')
 })
 
@@ -136,7 +137,7 @@ it('explains when a default source cannot take over and cancellation makes no ch
   mocks.matrix.mockResolvedValue({ capabilities: [{ ...capability, candidates: [] }] })
   await render(<PackageActions plugin={amberPlugin} refresh={mocks.refresh} />)
   await click(button('卸载插件'))
-  await vi.waitFor(() => expect(node.textContent).toContain('相应能力将暂停取数'))
+  await waitForAct(() => expect(node.textContent).toContain('相应能力将暂停取数'))
   await click(button('取消'))
   expect(mocks.manage).not.toHaveBeenCalled()
   expect(node.querySelector('[role="dialog"]')).toBeNull()
@@ -147,7 +148,7 @@ it('keeps a failed uninstall available for retry without reporting success', asy
   mocks.manage.mockRejectedValue(new Error('插件目录不可写'))
   await render(<PackageActions plugin={amberPlugin} refresh={mocks.refresh} />)
   await click(button('卸载插件'))
-  await vi.waitFor(() => expect(button('确认卸载').disabled).toBe(false))
+  await waitForAct(() => expect(button('确认卸载').disabled).toBe(false))
   await click(button('确认卸载'))
   expect(node.querySelector('[role="dialog"] [role="alert"]')?.textContent).toContain('插件目录不可写')
   expect(mocks.refresh).not.toHaveBeenCalled()

@@ -967,7 +967,7 @@ def _openai_error_detail(exc: Exception) -> str:
         content_type = response.headers.get("content-type", "").lower()
         try:
             text = response.text
-        except Exception:
+        except Exception:  # noqa: BLE001
             text = ""
     if not text and isinstance(body, str):
         text = body
@@ -1319,8 +1319,6 @@ _MACOS_CODEX_BIN_DIRS = (
 def _resolve_macos_codex_command() -> str | None:
     """Find Codex CLI in common macOS locations when the process PATH misses it."""
     candidates: list[Path] = [Path.home() / ".local" / "bin" / "codex"]
-    for bin_dir in _MACOS_CODEX_BIN_DIRS:
-        candidates.append(bin_dir / "codex")
     # Codex Desktop (ChatGPT.app) 内置 CLI — 与 ~/.codex 登录态配套
     for apps in (_MACOS_SYSTEM_APPLICATIONS, Path.home() / "Applications"):
         cli_root = apps / "ChatGPT.app" / "Contents" / "Resources" / "codex-cli"
@@ -1330,6 +1328,11 @@ def _resolve_macos_codex_command() -> str | None:
                 candidates.extend(sorted(cli_root.glob("*.app/Contents/MacOS/codex")))
         except OSError:
             continue
+    # 测试/嵌入式宿主可以替换应用根目录；此时不应越过隔离边界读取本机
+    # Homebrew/系统目录，避免宿主环境中的同名 CLI 污染解析结果。
+    if Path("/Applications") == _MACOS_SYSTEM_APPLICATIONS:
+        for bin_dir in _MACOS_CODEX_BIN_DIRS:
+            candidates.append(bin_dir / "codex")
     for candidate in candidates:
         try:
             # 与 shutil.which 同口径校验可执行位: 只查 is_file 会解析到同名

@@ -307,7 +307,7 @@ export function Data() {
       const t = setTimeout(() => setActiveJobId(null), 5_000)
       return () => clearTimeout(t)
     }
-  }, [job.data?.status])
+  }, [job.data, job.data?.status, qc])
 
   useEffect(() => {
     if (job.isError && /404/.test(String((job.error as any)?.message ?? ''))) {
@@ -319,7 +319,7 @@ export function Data() {
     if (!activeJobId && history.data?.active_id) {
       setActiveJobId(history.data.active_id)
     }
-  }, [history.data?.active_id])
+  }, [activeJobId, history.data?.active_id])
 
   const s = status.data
   // busy 降级 (预热/同步/修复期间) 且冷启动缓存未热时 storage 为 null — 单独取别名,
@@ -364,7 +364,7 @@ export function Data() {
     Math.max(30, Math.ceil((Date.now() - indexTargetDate.getTime()) / 86_400_000) + 1),
   )
 
-  const STAGE_CARD: Record<string, string> = {
+  const STAGE_CARD = useMemo<Record<string, string>>(() => ({
     sync_instruments: 'instruments',
     sync_daily: 'daily',
     extend_history: 'daily',
@@ -377,7 +377,7 @@ export function Data() {
     compute_regime: 'regime',
     // regime 软失败时入 skipped_stages 的是 'regime'(非 stage 名), 也映射到该卡片
     regime: 'regime',
-  }
+  }), [])
   const activeCard = isRunning && job.data ? STAGE_CARD[job.data.stage] ?? null : null
 
   const skippedCards = new Set(
@@ -398,7 +398,7 @@ export function Data() {
     }
     prevStageRef.current = stage
     qc.invalidateQueries({ queryKey: QK.dataStatus })
-  }, [job.data?.stage])
+  }, [job.data?.stage, qc, STAGE_CARD])
 
   useEffect(() => {
     if (!activeJobId) {

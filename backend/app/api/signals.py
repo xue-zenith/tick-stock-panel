@@ -41,8 +41,8 @@ class ConditionModel(BaseModel):
     left: str        # 字段名（日线在白名单 / 盘中在特征白名单）
     op: str          # > >= < <= == != ; 盘中额外: cross_up cross_down
     right: str       # "field:xxx" 或数字字符串
-    leftDays: int = 0    # 左字段取几日前 (0=当日, 默认; 盘中信号必须为 0)
-    rightDays: int = 0   # 右字段取几日前 (仅 right 为字段时有意义; 盘中信号必须为 0)
+    leftDays: int = 0    # 左字段取几日前 (0=当日, 默认; 盘中信号必须为 0)  # noqa: N815
+    rightDays: int = 0   # 右字段取几日前 (仅 right 为字段时有意义; 盘中信号必须为 0)  # noqa: N815
 
 
 class SignalModel(BaseModel):
@@ -86,7 +86,7 @@ def get_options():
         for f in sorted(allowed)
     ]
     # 字段分组 (只包含白名单内的字段, 供前端 optoptgroup 渲染)
-    _GROUP_LABELS = {
+    _GROUP_LABELS = {  # noqa: N806
         "basic": "基础", "ma": "均线 MA", "ema": "指数均线 EMA",
         "macd": "MACD", "boll": "布林带 BOLL", "kdj": "KDJ",
         "atr": "ATR", "volume": "量价", "extremes": "极值",
@@ -178,7 +178,7 @@ def save_signal(req: SignalModel, request: Request):
     try:
         custom_signals.validate(sig)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))  # noqa: B904
     # 显式列名冲突闸: 两个定义输出同一列 (如改名另存仍带 signal_* column)
     # 会让后者静默覆盖前者的注入, 必须显式拒绝。
     if sig.get("column"):

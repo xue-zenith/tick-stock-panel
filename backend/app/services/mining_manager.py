@@ -199,7 +199,7 @@ class MiningJobManager:
                 self._finish_success(run_id, result, cancel_event)
         except HeavyJobCancelledError:
             self._finish_cancelled(run_id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             if cancel_event.is_set():
                 self._finish_cancelled(run_id)
             else:

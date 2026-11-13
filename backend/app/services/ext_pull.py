@@ -2,13 +2,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import threading
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from datetime import UTC, date, datetime, timedelta, timezone
-from functools import reduce
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -242,7 +239,6 @@ def _apply_auth(config_id: str, auth: dict | None, url: str, headers: dict[str, 
     from urllib.parse import quote
 
     from app import secrets_store
-
     from app.services.ext_data import get_ext_api_key
 
     auth_type = str((auth or {}).get("type") or "none").lower()
@@ -577,12 +573,12 @@ async def _backfill_history(
                     else:
                         rows_written += await run_ext_data_io(rows_to_parquet, rows, config, data_dir, snapshot_date=d)
                         fetched += 1
-                except Exception as e2:
+                except Exception as e2:  # noqa: BLE001
                     if _status_code(e2) == 404:  # 退避重试后无该日快照 → 同样视为无数据
                         empty += 1
                     else:
                         failed.append({"date": d.isoformat(), "reason": str(e2)[:200]})
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             failed.append({"date": d.isoformat(), "reason": str(e)[:200]})
         if i + 1 < len(days):
             await asyncio.sleep(_BACKFILL_DAY_INTERVAL_S)  # 限速, 对数据源礼貌
@@ -755,16 +751,16 @@ class PullScheduler:
             n, d = await fetch_and_ingest(
                 fresh, self._data_dir, keep_strategy_cache=True
             )
-            fresh.pull.last_run = datetime.now(timezone.utc).isoformat()
+            fresh.pull.last_run = datetime.now(UTC).isoformat()
             fresh.pull.last_status = "success"
             fresh.pull.last_message = f"{n} rows @ {d}"
             fresh.pull.last_rows = n
             await run_ext_data_io(store.upsert, fresh, keep_strategy_cache=True)
             logger.info("PullScheduler: %s success, %d rows", fresh.id, n)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             fresh2 = await run_ext_data_io(store.get, fresh.id)
             if fresh2 and fresh2.pull:
-                fresh2.pull.last_run = datetime.now(timezone.utc).isoformat()
+                fresh2.pull.last_run = datetime.now(UTC).isoformat()
                 fresh2.pull.last_status = "error"
                 fresh2.pull.last_message = str(e)[:200]
                 await run_ext_data_io(store.upsert, fresh2, keep_strategy_cache=True)
@@ -851,7 +847,7 @@ class PullScheduler:
 
                 # 时间窗口检查: 不在窗口内则跳过本次拉取
                 if not _in_time_window(pull.time_window_start, pull.time_window_end):
-                    fresh.pull.last_run = datetime.now(timezone.utc).isoformat()
+                    fresh.pull.last_run = datetime.now(UTC).isoformat()
                     fresh.pull.last_status = "skipped"
                     fresh.pull.last_message = "不在拉取时间窗口内"
                     await run_ext_data_io(store.upsert, fresh, keep_strategy_cache=True)

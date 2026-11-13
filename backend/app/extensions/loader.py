@@ -57,7 +57,7 @@ def configure_backend_extensions(
             registry.register(registrar)
             for router in registrar.routers:
                 app.include_router(router)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("backend extension load failed %s: %s", module_name, exc)
             errors.append(BackendExtensionLoadError(module_name, str(exc)))
 
@@ -100,7 +100,7 @@ def start_backend_extensions(
             startup = getattr(module, "startup", None)
             if callable(startup):
                 startup(context)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("backend extension startup failed %s: %s", module_name, exc)
 
 
@@ -119,7 +119,7 @@ async def stop_backend_extensions(
                 result = shutdown(context)
                 if inspect.isawaitable(result):
                     await result
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("backend extension shutdown failed %s: %s", module_name, exc)
 
 

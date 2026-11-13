@@ -7,6 +7,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
+from app.api.data import invalidate_storage_cache
 from app.jobs import daily_pipeline
 from app.services.pipeline_jobs import (
     JobCancelledError,
@@ -15,7 +16,6 @@ from app.services.pipeline_jobs import (
     run_with_capacity,
     try_acquire_run_slot,
 )
-from app.api.data import invalidate_storage_cache
 
 # 长时间任务专用线程池（隔离于 FastAPI 默认线程池，防止阻塞请求处理）
 _long_task_executor = _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix="long-task")
@@ -96,14 +96,14 @@ async def _submit_job(repo, quote_service, make_run) -> dict:
             # 已被 reap/手动取消终止: job 状态已由 terminate() 写为 failed,
             # 拉取线程在分块回调处自行退出, 这里无需(也无法)再写状态。
             logger.warning("pipeline job %s cancelled", job_id)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.exception("pipeline job failed")
             job_store.fail(job_id, str(e))
             invalidate_storage_cache()
         finally:
             release_run_slot(job_id)
 
-    asyncio.create_task(task())
+    asyncio.create_task(task())  # noqa: RUF006
     return {"job_id": job_id, "reused": False}
 
 

@@ -302,7 +302,7 @@ async def execute_tool(
                     available = ", ".join(
                         str(s.get("id")) for s in engine.list_strategies()[:12] if s.get("id")
                     )
-                except Exception:  # 列举失败不影响错误本身
+                except Exception:  # 列举失败不影响错误本身  # noqa: BLE001
                     available = ""
                 hint = f"; 可用策略: {available}" if available else "; 可先用 list_strategies 查询"
                 return {"ok": False, "error": f"策略 {strategy_id} 不存在{hint}"}

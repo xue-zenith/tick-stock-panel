@@ -54,7 +54,7 @@ async function renderCard(onOpenStock = vi.fn()) {
   const errors: unknown[] = []
   const spy = vi.spyOn(console, 'error').mockImplementation((...args) => { errors.push(args) })
   await act(async () => root.render(
-    <MemoryRouter>
+    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <QueryClientProvider client={client}>
         <DragonTigerCard date="2026-10-29" onOpenStock={onOpenStock} />
       </QueryClientProvider>

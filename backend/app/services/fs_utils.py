@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,10 +24,8 @@ def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     if mode is not None:
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(tmp, mode)
-        except OSError:
-            pass
     os.replace(tmp, path)
 
 

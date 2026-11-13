@@ -374,10 +374,10 @@ def test_build_overview_negative_side_stricter_threshold() -> None:
 
 # ── 监控规则接入 (type=abnormal) ────────────────────────
 
-import pytest
+import pytest  # noqa: E402
 
-from app.strategy import monitor_rules
-from app.strategy.monitor import MonitorRuleEngine
+from app.strategy import monitor_rules  # noqa: E402
+from app.strategy.monitor import MonitorRuleEngine  # noqa: E402
 
 
 def _ab_rule(**overrides) -> dict:

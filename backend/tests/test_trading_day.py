@@ -8,7 +8,7 @@ tickflow 戳的 OR 语义与开盘缓冲窗、失败/无权限 → None、TTL �
 
 from __future__ import annotations
 
-from datetime import date, datetime, time as dt_time, timezone, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -265,7 +265,7 @@ def _minute_service(monkeypatch):
 def test_minute_refresh_gate_returns_holiday(monkeypatch):
     """周几+时段门控放行 (周一盘中) 但探针判休市 → holiday。"""
     svc = _minute_service(monkeypatch)
-    monday_1030 = datetime(2026, 9, 7, 10, 30, tzinfo=CN)
+    datetime(2026, 9, 7, 10, 30, tzinfo=CN)
     monkeypatch.setattr(
         "app.services.minute_refresh._in_continuous_session", lambda now=None: True
     )
@@ -285,8 +285,8 @@ def test_minute_refresh_gate_passes_when_trading(monkeypatch):
 # ---- fuyao 日历解析 ----
 
 def test_fuyao_provider_trading_days_conversion(monkeypatch):
-    from app.plugins.fuyao.provider import FuyaoProvider
     from app.plugins.fuyao import provider as fp
+    from app.plugins.fuyao.provider import FuyaoProvider
 
     class _CalClient:
         def trading_days(self):

@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -129,12 +130,10 @@ class JobStore:
                 encoding="utf-8",
             )
             os.replace(tmp, path)
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("failed to write job file %s", path)
-            try:
+            with contextlib.suppress(OSError):
                 tmp.unlink()
-            except OSError:
-                pass
 
     def _read_file(self, job_id: str) -> dict[str, Any] | None:
         """从磁盘读取单个 job 文件。"""
@@ -143,7 +142,7 @@ class JobStore:
             return None
         try:
             return json.loads(path.read_text("utf-8"))
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("failed to read job file %s", path)
             return None
 
@@ -151,13 +150,13 @@ class JobStore:
         """删除最老的 job 文件,保持文件数量 < max_jobs。"""
         try:
             files = sorted(self._store_dir.glob("*.json"), key=lambda f: f.stat().st_mtime)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return
         while len(files) >= self._max_jobs:
             oldest = files.pop(0)
             try:
                 oldest.unlink()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.warning("failed to delete old job file %s", oldest)
 
     def _job_files_sorted(self) -> list[dict[str, Any]]:
@@ -166,7 +165,7 @@ class JobStore:
         for f in self._store_dir.glob("*.json"):
             try:
                 jobs.append(json.loads(f.read_text("utf-8")))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 continue
         jobs.sort(key=lambda j: j.get("started_at") or "", reverse=True)
         return jobs
@@ -183,7 +182,7 @@ class JobStore:
         for f in self._store_dir.glob("*.json"):
             try:
                 j = json.loads(f.read_text("utf-8"))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 continue
             orig_status = j.get("status")
             if not j.get("id") or orig_status not in ("pending", "running"):
@@ -193,8 +192,8 @@ class JobStore:
             try:
                 mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=UTC)
                 end = mtime.strftime("%Y-%m-%dT%H:%M:%SZ")
-            except Exception:
-                end = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            except Exception:  # noqa: BLE001
+                end = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
             # mtime 早于 started_at(时钟回拨等)时夹住, 避免 duration 为负
             if j.get("started_at") and end < j["started_at"]:
                 end = j["started_at"]
@@ -244,7 +243,7 @@ class JobStore:
             job_id = uuid.uuid4().hex[:10]
             # last_progress_at 锚定创建时刻: pending 阶段(executor 排队/等重任务槽)
             # 也要有「已知存活」基准, 否则从未上报进度的排队任务永远不进 reap 视野。
-            created_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            created_at = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
             job = {
                 "id": job_id,
                 "status": "pending",
@@ -274,7 +273,7 @@ class JobStore:
             if not j:
                 return
             j["status"] = "running"
-            j["started_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            j["started_at"] = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
             # 心跳基准初始化为启动时刻: start() 到首次 progress() 之间的
             # 初始化阶段(解析标的池等)同样计入停滞计时。
             j["last_progress_at"] = j["started_at"]
@@ -287,7 +286,7 @@ class JobStore:
             if not j:
                 return
             j["status"] = "succeeded"
-            j["finished_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            j["finished_at"] = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
             j["progress"] = 100
             j["result"] = result
             j["duration_s"] = _duration_s(j)
@@ -302,7 +301,7 @@ class JobStore:
             if not j:
                 return
             j["status"] = "failed"
-            j["finished_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            j["finished_at"] = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
             j["error"] = error
             j["duration_s"] = _duration_s(j)
             if self._active_id == job_id:
@@ -326,13 +325,13 @@ class JobStore:
             previous_stage = j["stage"]
             j["stage"] = stage
             j["progress"] = max(0, min(100, int(pct)))
-            j["last_progress_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            j["last_progress_at"] = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
             if stage_pct is not None:
                 j["stage_pct"] = max(0, min(100, int(stage_pct)))
             elif previous_stage != stage:
                 j["stage_pct"] = 0
             entry = {
-                "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "ts": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
                 "stage": stage,
                 "msg": msg,
             }
@@ -483,9 +482,9 @@ class JobStore:
             self._active_jobs.clear()
             self._active_id = None
             for f in self._store_dir.glob("*.json"):
-                try:
+                try:  # noqa: SIM105
                     f.unlink()
-                except Exception:
+                except Exception:  # noqa: BLE001
                     pass
         with _CANCEL_FLAGS_LOCK:
             _CANCEL_FLAGS.clear()
@@ -560,7 +559,7 @@ def run_with_capacity(job_id: str, fn: Callable[[], _Result]) -> _Result:
             job_id,
             f"排队等待重任务执行槽超时({int(wait_s)}s): 槽位可能被长回测或未正常退出的"
             "残留任务占用, 请稍后重试; 若持续出现请重启后端")
-        raise JobCancelledError(job_id)
+        raise JobCancelledError(job_id)  # noqa: B904
 
 
 # ================================================================

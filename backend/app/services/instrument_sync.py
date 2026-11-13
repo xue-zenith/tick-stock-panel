@@ -91,7 +91,7 @@ def sync_instruments(data_dir: Path) -> int:
                 if items:
                     all_rows.extend(_flatten_instruments(items, current_limits=current_limits))
                     logger.info("instruments %s: %d stocks", ex, len(items))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning("get_instruments(%s) failed: %s", ex, e)
 
     if not all_rows:

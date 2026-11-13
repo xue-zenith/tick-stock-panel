@@ -18,7 +18,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import polars as pl
@@ -213,7 +213,9 @@ def add_batch(
                     gids.append(gid)
             rows.insert(0, {
                 "symbol": symbol,
-                "added_at": datetime.utcnow().isoformat(timespec="seconds"),
+                # Preserve the legacy UTC-without-suffix storage format while
+                # avoiding the deprecated naive ``utcnow()`` constructor.
+                "added_at": datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds"),
                 "note": note,
                 "group_ids": gids,
             })

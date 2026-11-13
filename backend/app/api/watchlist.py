@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import logging
-import math
 import time
+from collections.abc import Callable
 from datetime import UTC, date, datetime
-from typing import Callable
 
 import anyio
 import polars as pl
@@ -224,7 +223,7 @@ def ocr_status():
 
 
 @router.post("/import-image")
-async def import_from_image(request: Request, file: UploadFile = File(...)):
+async def import_from_image(request: Request, file: UploadFile = File(...)):  # noqa: B008
     """从自选截图识别股票代码，返回候选列表（不自动写入自选）。"""
     content_type = (file.content_type or "").split(";")[0].strip().lower()
     filename = (file.filename or "").lower()
@@ -250,7 +249,7 @@ async def import_from_image(request: Request, file: UploadFile = File(...)):
         raise HTTPException(400, str(e)) from e
     except RuntimeError as e:
         raise HTTPException(503, str(e)) from e
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("watchlist import-image failed")
         raise HTTPException(500, f"识别失败: {e}") from e
 
@@ -265,7 +264,7 @@ def _run_candidate_import(parse: Callable[[], dict], empty_msg: str) -> dict:
         result = parse()
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("watchlist import failed")
         raise HTTPException(500, f"解析失败: {e}") from e
     if not result["candidates"]:
@@ -275,7 +274,7 @@ def _run_candidate_import(parse: Callable[[], dict], empty_msg: str) -> dict:
 
 
 @router.post("/import-csv")
-async def import_from_csv(request: Request, file: UploadFile = File(...)):
+async def import_from_csv(request: Request, file: UploadFile = File(...)):  # noqa: B008
     """从 CSV / TXT 导入自选候选列表（不自动写入自选）。
 
     兼容同花顺/东财/通达信导出（逗号或 Tab 分隔、UTF-8 或 GBK 编码）。目标分组
@@ -405,7 +404,7 @@ _WATCHLIST_COLS = [
 def _added_dates_bj(entries: list[dict]) -> dict[str, date]:
     """自选条目的 added_at (naive UTC ISO 串) → 北京日期; 空值/非法值跳过该条。
 
-    added_at 由 watchlist.add_batch 以 datetime.utcnow() 写入 (无 Z 后缀), 属 UTC 语义;
+    added_at 由 watchlist.add_batch 以 UTC aware datetime 写入, 属 UTC 语义;
     必须显式按 UTC 解析再转北京 —— 否则北京时间 00:00-08:00 加入的记录会被算到前一天。
     换算惯例同 backtest/minute_replay.py, 服务器本地时区不参与 (CONTRIBUTING §3.3)。
     """
@@ -514,10 +513,7 @@ def watchlist_enriched(
     # 会把不在缓存 universe 里的自选静默丢弃.
     if stock_symbols:
         watchlist_df = pl.DataFrame({"symbol": stock_symbols})
-        if df_e.is_empty():
-            df = watchlist_df
-        else:
-            df = watchlist_df.join(df_e, on="symbol", how="left")
+        df = watchlist_df if df_e.is_empty() else watchlist_df.join(df_e, on="symbol", how="left")
     else:
         df = pl.DataFrame()
 
@@ -596,7 +592,7 @@ def watchlist_enriched(
             df = df.with_columns(pl.col("symbol").replace_strict(name_map, default=None, return_dtype=pl.Utf8).alias("name"))
 
     # 选择内置需要的列
-    keep = [c for c in _WATCHLIST_COLS + ["name", "float_shares", "asset_type", "prepared_daily"] if c in df.columns]
+    keep = [c for c in [*_WATCHLIST_COLS, "name", "float_shares", "asset_type", "prepared_daily"] if c in df.columns]
     df = df.select(keep)
 
     # 涨跌停价 (交易所整数分半进位口径, 仅股票): prev_close/名称已在行上, 对自选的
@@ -659,7 +655,7 @@ def watchlist_enriched(
                 )
                 .drop("base_close")
             )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         # 装饰列失败不得影响自选主表; 两列必须存在 (值可为 null), 否则前端排序/筛选静默失效
         logger.warning("自选加入日期/加入后涨跌幅计算跳过: %s", e, exc_info=True)
         df = df.with_columns(
@@ -699,7 +695,7 @@ def watchlist_enriched(
                         .rename({field_name: ext_col_name})
                     )
                     df = df.join(ext_df.select(["symbol", ext_col_name]), on="symbol", how="left")
-            except Exception:
+            except Exception:  # noqa: BLE001
                 # view 不存在或字段不存在，尝试直接读 parquet
                 cfg = configs.get(config_id)
                 if cfg:
@@ -713,7 +709,7 @@ def watchlist_enriched(
                                 .rename({field_name: ext_col_name})
                             )
                             df = df.join(ext_df, on="symbol", how="left")
-                    except Exception as e2:
+                    except Exception as e2:  # noqa: BLE001
                         logger.debug("ext join fallback failed for %s.%s: %s", config_id, field_name, e2)
 
     # sanitize NaN / Inf

@@ -50,8 +50,8 @@ def _df_to_records(df) -> list[dict]:
 @router.get("/history")
 def regime_history(
     request: Request,
-    start: date | None = Query(None),
-    end: date | None = Query(None),
+    start: date | None = Query(None),  # noqa: B008
+    end: date | None = Query(None),  # noqa: B008
     limit: int = Query(120, ge=1, le=1000),
 ):
     """历史环境时序(含状态/指标)。默认最近 N 天。"""
@@ -330,7 +330,7 @@ def regime_mainline(
         from app.services import preferences
 
         filter_cfg = preferences.get_mainline_filter_config()
-    except Exception:
+    except Exception:  # noqa: BLE001
         filter_cfg = {"min_members": 4, "max_members": 600, "blacklist": []}
     df = load_mainline_history(_data_dir(request), kind)
     if df.is_empty():

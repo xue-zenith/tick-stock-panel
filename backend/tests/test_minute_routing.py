@@ -676,8 +676,8 @@ def test_provider_has_dataset_exception_does_not_fall_back(monkeypatch):
 
 # ---------- 测试 15-17: GenericHTTPProvider opt-in 参数传递 (Issue 3) ----------
 
-from app.data_providers.custom.config import CustomSourceConfig, DatasetConfig
-from app.data_providers.custom.provider import GenericHTTPProvider
+from app.data_providers.custom.config import CustomSourceConfig, DatasetConfig  # noqa: E402
+from app.data_providers.custom.provider import GenericHTTPProvider  # noqa: E402
 
 
 def _make_minute_config(**extra) -> CustomSourceConfig:
@@ -1300,7 +1300,6 @@ def test_get_minute_batch_plain_without_accept_encoding(monkeypatch):
 
 def _daily_mock_env(monkeypatch, *, compress_on, accept="gzip, deflate"):
     """构造 get_daily_batch 压缩路径的最小 mock。"""
-    from app.api import kline as kline_api
     from app.services import preferences as prefs
 
     monkeypatch.setattr(prefs, "get_daily_batch_compress", lambda: compress_on)
@@ -1389,7 +1388,7 @@ def test_preferences_parallel_saves_do_not_lose_each_other(tmp_path, monkeypatch
 
     t1 = threading.Thread(target=write_key, args=("minute_batch_compress",))
     t2 = threading.Thread(target=write_key, args=("daily_batch_compress",))
-    t1.start(); t2.start(); t1.join(); t2.join()
+    t1.start(); t2.start(); t1.join(); t2.join()  # noqa: E702
 
     final = prefs.load()
     assert final["minute_batch_compress"] is False

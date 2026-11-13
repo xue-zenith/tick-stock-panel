@@ -8,9 +8,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import polars as pl
 
@@ -38,7 +37,7 @@ def _get_symbols(data_dir: Path) -> list[str]:
     try:
         df = pl.read_parquet(inst_path, columns=["symbol"])
         return df["symbol"].to_list()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning("读取 instruments 失败: %s", e)
         return []
 
@@ -77,8 +76,8 @@ def _fetch_table(
 
     # 自定义数据源分流
     if is_custom:
-        from app.services import preferences
         from app.data_providers import custom as custom_sources
+        from app.services import preferences
         try:
             provider = custom_sources.get_provider(preferences.get_financial_provider())
             df = provider.get_financials(table, symbols, latest_only=latest_only)
@@ -121,7 +120,7 @@ def _fetch_table(
                                 rec["symbol"] = sym
                                 all_records.append(rec)
             logger.debug("sync_%s batch %d/%d: %d records", table, batch_num, total_batches, len(data) if isinstance(data, dict) else 0)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning("sync_%s batch %d/%d failed: %s", table, batch_num, total_batches, e)
 
     if not all_records:
@@ -288,7 +287,7 @@ def _refresh_financials_views(data_dir: Path) -> None:
         "financials_cash_flow": f"{d}/financials/cash_flow/*.parquet",
         "financials_shares": f"{d}/financials/shares/*.parquet",
     }
-    for name, path in views.items():
+    for name, _path in views.items():
         out = data_dir / "financials" / name.replace("financials_", "") / "part.parquet"
         if not out.exists():
             continue
@@ -303,7 +302,7 @@ def get_financial_df(data_dir: Path, table: str) -> pl.DataFrame:
         return pl.DataFrame()
     try:
         return pl.read_parquet(path)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning("读取 financials/%s 失败: %s", table, e)
         return pl.DataFrame()
 
@@ -352,7 +351,7 @@ class FinancialScheduler:
                     continue
                 parquet = data_dir / "financials" / table / "part.parquet"
                 if parquet.exists():
-                    mtime = datetime.fromtimestamp(parquet.stat().st_mtime, tz=timezone.utc).isoformat()
+                    mtime = datetime.fromtimestamp(parquet.stat().st_mtime, tz=UTC).isoformat()
                     restored[table] = mtime
                     preferences.set_financial_sync_time(table, mtime)
                     logger.info("FinancialScheduler backfilled last_sync for %s from parquet mtime", table)
@@ -377,7 +376,7 @@ class FinancialScheduler:
         持久化确保即使重启,前端 /status 仍返回真实的最后同步时间,
         不会错误地显示"尚未同步"。
         """
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         self._last_sync[table] = ts
         try:
             from app.services import preferences
@@ -423,7 +422,7 @@ class FinancialScheduler:
                     rows = sync_metrics(self._data_dir, self._capset)
                     self._record_sync("metrics")
                     logger.info("FinancialScheduler: metrics synced, %d rows", rows)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     logger.warning("FinancialScheduler: metrics sync failed: %s", e)
 
                 # 等待下一次 (7天)
@@ -512,7 +511,7 @@ class FinancialScheduler:
         def _bg() -> None:
             try:
                 self._run_body(table)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.exception("background financial sync failed: %s", e)
             finally:
                 with self._lock:

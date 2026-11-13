@@ -160,7 +160,7 @@ def _bench_rt_pct(quote_service: Any) -> float:
     """
     try:
         df = quote_service.get_index_quotes()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return 0.0
     if df is None or df.is_empty():
         return 0.0
@@ -197,7 +197,7 @@ def build_overview(
     if quote_service is not None:
         try:
             index_quotes = quote_service.get_index_quotes()
-        except Exception:
+        except Exception:  # noqa: BLE001
             index_quotes = None
         for k in BENCH_KEYS:
             bench_by_key[k] = bench_rt_pct_for(index_quotes, k)

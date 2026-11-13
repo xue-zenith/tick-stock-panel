@@ -11,7 +11,6 @@ import pytest
 
 from app.backtest import worker as worker_module
 from app.backtest.mining import benchmark_candidate
-from app.backtest.optimizer import OptimizeConfig
 from app.backtest.strategy import StrategyBacktestConfig
 from app.backtest.walkforward import WalkForwardConfig
 from app.backtest.worker import BacktestWorkerError, make_worker_task, run_worker_task

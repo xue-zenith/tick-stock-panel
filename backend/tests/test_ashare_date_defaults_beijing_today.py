@@ -15,11 +15,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import polars as pl
-import pytest
 
 from app.api import backtest as backtest_api
 from app.api import factors as factors_api
-from app.api import kline as kline_api
 from app.api import regime as regime_api
 from app.services import market_mainline, regime_builder, repair_daily
 
@@ -97,9 +95,9 @@ def test_factors_trial_uses_beijing_today(monkeypatch) -> None:
     req_data = factors_api.FormulaTrialRequest(formula="close / open", days=20)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=MagicMock())))
 
-    try:
+    try:  # noqa: SIM105
         factors_api.trial_formula(req_data, request)
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
     assert captured_args
     _start, end = captured_args[0]

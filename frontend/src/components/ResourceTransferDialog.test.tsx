@@ -236,7 +236,7 @@ it('close and Escape cannot interrupt a pending file operation', async () => {
 it('the resource entry opens the unified center with its resource context', async () => {
   qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   root = createRoot(container)
-  await act(async () => root!.render(<MemoryRouter><QueryClientProvider client={qc}><ResourceTransferButton kind="factor" /></QueryClientProvider></MemoryRouter>))
+  await act(async () => root!.render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={qc}><ResourceTransferButton kind="factor" /></QueryClientProvider></MemoryRouter>))
   const opener = container.querySelector<HTMLAnchorElement>('[aria-label="因子导入与导出"]')!
   expect(opener.getAttribute('href')).toBe('/settings?tab=import&kind=factor')
   expect(document.querySelector('[role="dialog"]')).toBeNull()

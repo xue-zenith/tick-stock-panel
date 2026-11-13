@@ -53,7 +53,7 @@ def run_worker() -> int:
     def stage(name: str, **extra) -> None:
         if progress is None:
             return
-        try:
+        try:  # noqa: SIM105
             progress.write_text(json.dumps({"stage": name, **extra}), encoding="utf-8")
         except Exception:  # noqa: BLE001
             pass

@@ -74,7 +74,7 @@ async function renderPage() {
   const errors: unknown[] = []
   const spy = vi.spyOn(console, 'error').mockImplementation((...args) => { errors.push(args) })
   await act(async () => root.render(
-    <MemoryRouter><QueryClientProvider client={client}><StrategyBacktest /></QueryClientProvider></MemoryRouter>,
+    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={client}><StrategyBacktest /></QueryClientProvider></MemoryRouter>,
   ))
   await act(async () => { await new Promise(r => setTimeout(r, 80)) })
   spy.mockRestore()

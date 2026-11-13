@@ -36,7 +36,7 @@ def test_concurrent_upserts_do_not_lose_rows(tmp_path: Path) -> None:
         try:
             for _ in range(3):  # 每线程多轮写, 提高乐观重试路径命中
                 repo.merge_live_daily_asset("stock", _frame(symbols))
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001
             errors.append(exc)
 
     threads = [threading.Thread(target=worker, args=(g,), daemon=True) for g in groups]

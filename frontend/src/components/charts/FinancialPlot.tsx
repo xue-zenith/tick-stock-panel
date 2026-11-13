@@ -151,6 +151,8 @@ export function FinancialPlot(props: Props) {
     chart.subscribeCrosshairMove(hover); chart.subscribeClick(select); chart.subscribeDblClick(doubleClick)
     chart.timeScale().subscribeVisibleLogicalRangeChange(zoom)
     chart.timeScale().subscribeSizeChange(resize)
+    const series = seriesRef.current
+    const annotations = paneAnnotations.current
     return () => {
       cancelAnimationFrame(frame)
       cancelAnimationFrame(resizeFrame)
@@ -158,8 +160,8 @@ export function FinancialPlot(props: Props) {
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(zoom)
       chart.timeScale().unsubscribeSizeChange(resize)
       markerRef.current?.detach(); markerRef.current = null
-      chart.remove(); chartRef.current = null; seriesRef.current.clear(); scopeRef.current = null
-      paneAnnotations.current.clear(); attachedMain.current = null; attachedLeft.current = null
+      chart.remove(); chartRef.current = null; series.clear(); scopeRef.current = null
+      annotations.clear(); attachedMain.current = null; attachedLeft.current = null
     }
   }, [])
 
@@ -182,7 +184,7 @@ export function FinancialPlot(props: Props) {
       timeScale: { timeVisible: intraday, fixRightEdge: !intraday && !props.rightOffsetPixels, rightOffset: 0,
         minBarSpacing: intraday ? 0.01 : 0.5, lockVisibleTimeRangeOnResize: props.visibleBars === 'all' },
     })
-  }, [props.intraday, props.visibleBars])
+  }, [props.intraday, props.visibleBars, props.rightOffsetPixels])
 
   useEffect(() => {
     const chart = chartRef.current
@@ -298,7 +300,7 @@ export function FinancialPlot(props: Props) {
     } else if (view) chart.timeScale().setVisibleLogicalRange(view)
     if (reset) props.onHover?.(null)
     scopeRef.current = props.scope
-  }, [props.scope, props.series, props.paneHeights, props.intraday, props.visibleBars, props.pricePrecision])
+  }, [props, props.scope, props.series, props.paneHeights, props.intraday, props.visibleBars, props.pricePrecision])
 
   useEffect(() => {
     const lines = [...(props.annotations?.priceLines ?? [])]

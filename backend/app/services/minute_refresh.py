@@ -148,7 +148,7 @@ class MinuteRefreshService:
             from app.tickflow.capabilities import Cap
 
             return capset.has(Cap.INTRADAY_UNIVERSE)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
     def active_provider(self) -> str:
@@ -245,7 +245,7 @@ class MinuteRefreshService:
                             break
                         self._stop.wait(min(_LOOP_STEP_S, max(0.0, self._state.next_round_at - now)))
                     continue
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 self._state.last_error = f"round failed: {e}"
                 logger.warning("全量分钟轮次异常: %s", e)
             self._stop.wait(_LOOP_STEP_S)

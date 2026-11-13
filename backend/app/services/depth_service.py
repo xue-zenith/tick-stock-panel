@@ -25,13 +25,12 @@ import math
 import os
 import threading
 import time
-from datetime import date, time as dt_time
-
-from app.market_time import cn_now, cn_today
-from pathlib import Path
+from datetime import date
+from datetime import time as dt_time
 
 import polars as pl
 
+from app.market_time import cn_now, cn_today
 from app.tickflow.capabilities import Cap
 from app.tickflow.rate_limits import (
     apply_safety_rpm,
@@ -317,7 +316,7 @@ class DepthService:
                     logger.warning("depth provider %s 未声明 depth5, 跳过本轮", provider_name)
                     return {}
                 provider = custom_sources.get_provider(provider_name)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning("depth provider %s 解析失败, 跳过本轮: %s", provider_name, e)
                 return {}
 

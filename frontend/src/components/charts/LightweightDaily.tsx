@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import type { SeriesMarker, Time } from 'lightweight-charts'
 import type { ChartMarker, DailyChartProps, OHLC } from '@/lib/chart-types'
 import { SUB_CHART_META, volMaN, volumeRatioAt } from '@/lib/chart-indicators'
@@ -54,7 +54,7 @@ export function LightweightDaily({ data, assetType, symbol = '', height = 480, a
   const rows = useMemo(() => validDailyRows(data), [data])
   const precision = pricePrecision(assetType)
   const theme = useTheme()
-  const color = (key: keyof typeof LINE_COLORS) => LINE_COLORS[key][theme]
+  const color = useCallback((key: keyof typeof LINE_COLORS) => LINE_COLORS[key][theme], [theme])
   const volumeMAs = useMemo(() => ({ 5: volMaN(rows, 5), 10: volMaN(rows, 10) }), [rows])
   const scope = `${symbol}:${rows[0]?.date ?? ''}:${ranges?.map(range => `${range.start}:${range.end}`).join(';') ?? ''}`
   const [hover, setHover] = useState<{ scope: string; time: string } | null>(null)
@@ -104,7 +104,7 @@ export function LightweightDaily({ data, assetType, symbol = '', height = 480, a
       }
     })
     return series
-  }, [rows, showMA, selected, activeIndicators, events, markerStyle, showMarkers, theme, volumeMAs])
+  }, [rows, showMA, selected, activeIndicators, events, markerStyle, showMarkers, theme, volumeMAs, color])
   const plotHeight = Math.max(260, height - (showInfoBar ? CHART_LAYOUT.readout : 0))
   const paneHeights = useMemo(() => plotPaneHeights(plotHeight, selected.length), [plotHeight, selected.length])
   const chartMarkers = useMemo<SeriesMarker<Time>[]>(() => showMarkers ? markers
@@ -146,7 +146,7 @@ export function LightweightDaily({ data, assetType, symbol = '', height = 480, a
         color: current?.macd_hist == null || !Number.isFinite(current.macd_hist) ? undefined : color(current.macd_hist >= 0 ? 'up' : 'down') })
     }
     return result
-  })], [selected, current, rows, i, volumeCompare.days, volumeCompare.enabled, theme, volumeMAs])
+  })], [selected, current, rows, i, volumeCompare.days, volumeCompare.enabled, volumeMAs, color])
   const change = previous?.close ? current.close / previous.close - 1 : null
   const turnover = stockInfo?.float_shares && current?.volume != null ? current.volume * 100 / stockInfo.float_shares : null
 

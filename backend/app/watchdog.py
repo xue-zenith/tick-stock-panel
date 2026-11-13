@@ -20,9 +20,8 @@ import os
 import threading
 from collections.abc import Callable
 
-import polars as pl
-
 import httpx
+import polars as pl
 
 from app.config import settings
 from app.polars_guard import guarded_collect
@@ -79,7 +78,7 @@ class HealthWatchdog:
                 # BaseException 分支吞掉, 取消会被误计为一次"探测失败"且循环
                 # 继续运行 — stop() 的 await self._task 永久等待 (关闭死锁)。
                 raise
-            except BaseException as exc:  # 探测任何异常都算失败 (含 to_thread 超时)
+            except BaseException as exc:  # 探测任何异常都算失败 (含 to_thread 超时)  # noqa: BLE001
                 self._consecutive_failures += 1
                 logger.error(
                     "watchdog probe failed (%d/%d): %r",
@@ -139,15 +138,15 @@ def start_watchdog(app_state, repo) -> HealthWatchdog | None:
 # ================================================================
 
 
-class QuotePoolStale(Exception):
+class QuotePoolStale(Exception):  # noqa: N818
     """行情 quote_age 陈旧但独立探针可达源 —— 池僵死信号。"""
 
 
-class SourceUnavailable(Exception):
+class SourceUnavailable(Exception):  # noqa: N818
     """独立探针探不到源 —— 源/网络问题, 不重建 (重建无用)。"""
 
 
-def quote_probe(qs, probe_http: "httpx.Client", mining_manager=None) -> None:
+def quote_probe(qs, probe_http: httpx.Client, mining_manager=None) -> None:
     """双信号探测 QuoteService 连接池健康度。
 
     非 polling 窗口直接返回 (休市不探, 避免误判)。
@@ -194,7 +193,7 @@ def quote_probe(qs, probe_http: "httpx.Client", mining_manager=None) -> None:
     # 比 trading-days (全年日历 ~250 行, ~3KB) 轻 10 倍。
     try:
         r = probe_http.get("/api/a-share/prices/snapshot", params={"limit": 1})
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise SourceUnavailable(f"探针网络失败: {e}") from e
     if r.status_code != 200:
         raise SourceUnavailable(f"探针 HTTP {r.status_code}")
@@ -336,7 +335,7 @@ class QuoteHealthWatcher:
                     self._source_unavailable_count = 0
                 except Exception as e:  # noqa: BLE001
                     logger.error("quote-health: 探针重建失败: %r", e)
-        except Exception as exc:  # 探测超时等普通异常, 保守计为僵死 (不含 KeyboardInterrupt/SystemExit)
+        except Exception as exc:  # 探测超时等普通异常, 保守计为僵死 (不含 KeyboardInterrupt/SystemExit)  # noqa: BLE001
             self._stale_count += 1
             self._last_probe_ok = False
             self._last_probe_msg = repr(exc)
@@ -425,7 +424,7 @@ def start_quote_health_watcher(app_state) -> QuoteHealthWatcher | None:
             headers={"X-api-key": api_key},
             timeout=10.0,
         )
-        try:
+        try:  # noqa: SIM105
             old.close()
         except Exception:  # noqa: BLE001
             pass

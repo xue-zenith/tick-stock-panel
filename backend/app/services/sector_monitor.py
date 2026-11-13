@@ -13,7 +13,6 @@ from typing import Any
 
 import polars as pl
 
-from app.services import preferences
 from app.services.ext_data import ExtConfig, ExtConfigStore
 from app.services.index_const import CORE_INDEX_NAMES as CORE_INDICES
 
@@ -152,7 +151,7 @@ class SectorMonitorService:
                     symbol = str(row.get("symbol") or "").strip().upper()
                     if symbol:
                         index_names[symbol] = str(row.get("name") or symbol)
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
         # 指数标的恒可实时监控: quote_service 对核心四只 + 启用规则标的显式拉取

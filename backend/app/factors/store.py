@@ -187,7 +187,7 @@ def load_into_registry(data_dir: Path) -> list[str]:
                     deferred.append(definition)
                 else:
                     logger.warning("custom factor 注册失败 %s: %s", definition.get("id"), exc)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("custom factor 注册失败 %s: %s", definition.get("id"), exc)
         if not deferred:
             break

@@ -113,7 +113,7 @@ def test_external_access_switch_is_the_effective_barrier(tmp_path) -> None:
         raised = False
         try:
             hardened.execute(inject)
-        except Exception:
+        except Exception:  # noqa: BLE001
             raised = True
         assert raised, "external_access=False 的连接不应能读外部文件"
     finally:

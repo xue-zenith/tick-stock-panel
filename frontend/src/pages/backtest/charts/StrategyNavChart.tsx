@@ -242,7 +242,7 @@ export function StrategyNavChart({ result }: Props) {
         }] : []),
       ],
     } as any
-  }, [result.equity_curve, result.drawdown_curve, result.benchmark_curve, result.run_id, ct, hidden])
+  }, [result.equity_curve, result.drawdown_curve, result.benchmark_curve, ct, hidden])
 
   const chartRef = useECharts(option, [result.run_id, ct], containerRef)
 

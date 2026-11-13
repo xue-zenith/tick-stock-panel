@@ -173,7 +173,7 @@ def _daily_close_lookup(daily_dir: Path, trade_day: date) -> dict[str, float] | 
         return None
     try:
         df = pl.read_parquet(part, columns=["symbol", "close"])
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning("迁移读日K分区失败 %s: %s", part, e)
         return None
     if df.is_empty():
@@ -265,7 +265,7 @@ def migrate_minute_to_raw(
                     else:
                         tmp.replace(part)
                     stats["converted_symbols"] += conv.height
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 stats["failed"] += 1
                 logger.warning("分钟分区迁移失败 %s: %s", part_dir.name, e)
             if progress_cb is not None:

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from app.definitions import JsonDefinitionStore
@@ -375,7 +375,7 @@ def normalize(rule: dict) -> dict:
         r["webhook_channels"] = [
             c for c in r["webhook_channels"] if c in ("feishu", "wecom", "custom", "email")
         ]
-    r.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    r.setdefault("created_at", datetime.now(UTC).isoformat())
     return r
 
 

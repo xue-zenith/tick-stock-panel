@@ -27,7 +27,8 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, time as dt_time
+from datetime import datetime
+from datetime import time as dt_time
 
 from app.market_time import CN_TZ, cn_now
 from app.services.shared_work import SharedWork, WorkBusyError

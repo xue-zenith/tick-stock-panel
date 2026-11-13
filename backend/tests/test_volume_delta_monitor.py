@@ -266,8 +266,10 @@ def test_inject_volume_delta_join():
 
 
 def test_session_start_ms_matches_clock():
+    from datetime import datetime, timedelta, timezone
+    from datetime import time as dt_time
+
     from app.services.quote_service import QuoteService
-    from datetime import datetime, time as dt_time, timedelta, timezone
 
     now = QuoteService._continuous_session_start_ms() / 1000.0
     start_dt = datetime.fromtimestamp(now, tz=timezone(timedelta(hours=8)))

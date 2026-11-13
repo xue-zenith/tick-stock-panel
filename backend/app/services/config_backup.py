@@ -767,7 +767,7 @@ def _groupby_dir(strategy_codes: dict[_Entry, str]) -> list[tuple[Path, list[tup
     return sorted(grouped.items(), key=lambda kv: kv[0].name)
 
 
-def _smoke_entry(entry: "_Entry", payload: bytes) -> dict:
+def _smoke_entry(entry: _Entry, payload: bytes) -> dict:
     """对导入的信号/因子定义跑静态冒烟; 冒烟自身异常不阻断导入 (fail-open)。"""
     from app.definitions import smoke_definition
 

@@ -19,7 +19,7 @@ export function DailyDataHealthNotice() {
       void qc.invalidateQueries({ predicate: q => DAILY_DATA_QUERY_PREFIXES.has(String(q.queryKey[0])) })
     }
     previous.current = version
-  }, [version, qc])
+  }, [version, revisions, qc])
   const assets = health.data?.blocking_assets ?? []
   if (!assets.length) return null
   return (

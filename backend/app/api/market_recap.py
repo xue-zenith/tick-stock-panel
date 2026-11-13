@@ -48,7 +48,7 @@ def get_dragon_tiger(
         try:
             target = date_cls.fromisoformat(date)
         except ValueError:
-            raise HTTPException(400, f"date 格式应为 YYYY-MM-DD, 收到: {date}")
+            raise HTTPException(400, f"date 格式应为 YYYY-MM-DD, 收到: {date}")  # noqa: B904
     return dragon_tiger.get_dragon_tiger(
         request.app.state.repo.store.data_dir, target
     )
@@ -68,7 +68,7 @@ def get_auction_benchmark(
         try:
             target = date_cls.fromisoformat(date)
         except ValueError:
-            raise HTTPException(400, f"date 格式应为 YYYY-MM-DD, 收到: {date}")
+            raise HTTPException(400, f"date 格式应为 YYYY-MM-DD, 收到: {date}")  # noqa: B904
     return auction_benchmark.get_auction_benchmark(
         request.app.state.repo.store.data_dir, target
     )
@@ -98,7 +98,7 @@ async def analyze_market(request: Request, req: AnalyzeRequest):
         try:
             as_of = date_cls.fromisoformat(req.as_of)
         except ValueError:
-            raise HTTPException(400, f"as_of 格式应为 YYYY-MM-DD,收到: {req.as_of}")
+            raise HTTPException(400, f"as_of 格式应为 YYYY-MM-DD,收到: {req.as_of}")  # noqa: B904
 
     async def stream_gen():
         async for chunk in with_heartbeat(

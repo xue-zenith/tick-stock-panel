@@ -132,7 +132,7 @@ export function StockPanel({
   // 信息条直接读 query data: 切股到已预取邻股时首帧即有数据, 配合 StockInfoBar 加载态占位,
   // 弹窗整体高度在切换瞬间不塌陷 (不抖动)。
   const kline = useQuery({ ...klineDailyQueryOptions(symbol, dateRange, extColumns), enabled: !!symbol })
-  const rawRows: KlineRow[] = kline.data?.rows ?? []
+  const rawRows = useMemo<KlineRow[]>(() => kline.data?.rows ?? [], [kline.data?.rows])
   // OHLC 视图用于日期选中/昨收价推导 (与图表侧同口径)
   const rows = useMemo(() => toOHLC(rawRows), [rawRows])
   const stockInfo = kline.data?.stock_info

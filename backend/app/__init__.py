@@ -22,7 +22,7 @@ def _load_version() -> str:
         pkg = Path(__file__).resolve().parents[2] / "frontend" / "package.json"
     try:
         return json.loads(pkg.read_text(encoding="utf-8"))["version"]
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         # 静默降级但必须可观测 (issue #513: Docker 镜像缺该文件时整站显示旧版本,
         # 无任何日志线索)。Dockerfile 已 COPY 兜底, 走到这通常是打包配置坏了。
         logging.getLogger(__name__).warning(
@@ -38,7 +38,7 @@ __version__ = _load_version()
 # 进程加载最早阶段强制 UTF-8,根治此类编码崩溃。
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
-        try:
+        try:  # noqa: SIM105
             _stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             pass

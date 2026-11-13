@@ -44,8 +44,7 @@ def _write_parquet_placeholder(path: Path) -> None:
 
 def _stub_clear_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.api import overview
-    from app.services import alert_store
-    from app.services import pipeline_jobs
+    from app.services import alert_store, pipeline_jobs
     from app.services.pipeline_jobs import job_store
     from app.services.screener import ScreenerService
 
@@ -236,7 +235,6 @@ def test_clear_data_pauses_and_restores_minute_refresh(
 ) -> None:
     """清空期间必须暂停全量分钟增量线程 (独立写 kline_minute, 不占 run slot),
     结束后按原运行状态恢复 — 否则"清完又被写回部分今日数据"。"""
-    from app.services import pipeline_jobs
 
     _stub_clear_side_effects(monkeypatch)
     repo = _RepoStub(tmp_path)

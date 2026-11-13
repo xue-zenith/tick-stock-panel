@@ -181,7 +181,7 @@ def test_public_config_shape() -> None:
     assert payload["dimension_order"] == list(DIMENSION_ORDER)
     assert set(payload["config"]) == {"dimensions", "thresholds"}
     assert payload["defaults"] == DEFAULT_CONFIG
-    names = [l["name"] for l in payload["labels"]]
+    names = [l["name"] for l in payload["labels"]]  # noqa: E741
     assert "强势" in names and "冰点" in names
     # 每个维度都带 label / weight / terms, 每个 term 带完整六字段
     for key in DIMENSION_ORDER:

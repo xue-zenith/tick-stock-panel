@@ -102,7 +102,7 @@ export function StockDataTable({
       return
     }
     onVisibleRowsChange(rows.slice(firstVirtualRow.index, lastVirtualRow.index + 1))
-  }, [firstVirtualRow?.index, lastVirtualRow?.index, rows, onVisibleRowsChange, virtualized])
+  }, [firstVirtualRow, lastVirtualRow, rows, onVisibleRowsChange, virtualized])
 
   const isColSortable = (col: ColumnConfig): boolean => {
     // 排序能力由调用方是否提供 onSortToggle 决定；sort 是否为 null 只影响当前指示器

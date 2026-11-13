@@ -53,7 +53,7 @@ def load_fundamental_snapshot(data_dir: Path | None) -> pl.DataFrame | None:
         return None
     try:
         frame = pl.read_parquet(path)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("读取财务指标快照失败: %s", exc)
         return None
     needed = {"symbol", "announce_date"} | {

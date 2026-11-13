@@ -291,7 +291,6 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
 
   // ── 标的标签: 名称 + 板标(创/科/北) + 代码, 可逐个删除 ──
   const [symbolsExpanded, setSymbolsExpanded] = useState(false)
-  const symbolsKey = draft.symbols.join(',')
   // 名称映射: 本地即时缓存(搜索/自选数据) 优先, 缺失的由批量名称接口补齐
   // (覆盖编辑旧规则等本地无名称的场景)。key 随标的集变化, staleTime 长防抖。
   const localNamesRef = useRef<Record<string, string>>({})
@@ -310,7 +309,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   })
   const nameBySymbol = useMemo(
     () => ({ ...localNamesRef.current, ...(namesQ.data?.names ?? {}) }),
-    [symbolsKey, namesQ.data],
+    [namesQ.data],
   )
   // 自选导入选项: 全部自选 + 各分组 (空分组隐藏) + 未分组
   const watchImportOptions = (() => {
@@ -336,7 +335,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
 
   // ── 自选分组作用域 (scope=watchlist_group): 分组选择 + 只读成员预览 ──
   const groupList = watchGroupsQ.data?.groups ?? []
-  const watchEntries = watchlistQ.data?.symbols ?? []
+  const watchEntries = useMemo(() => watchlistQ.data?.symbols ?? [], [watchlistQ.data?.symbols])
   const groupCounts = useMemo(() => {
     const counts: Record<string, number> = {}
     for (const entry of watchEntries) {

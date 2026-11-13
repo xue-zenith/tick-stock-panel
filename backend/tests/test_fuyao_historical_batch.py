@@ -134,6 +134,41 @@ def test_client_batch_network_failure_is_explicit(monkeypatch):
         client.close()
 
 
+def test_client_429_uses_retry_after_and_eventually_recovers(monkeypatch):
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        return httpx.Response(200, json=_payload([_group("000001.SZ")]))
+
+    client, _ = _http_client(monkeypatch, respond)
+    monkeypatch.setattr(fc._REQUEST_LIMITER, "wait", lambda: None)
+    monkeypatch.setattr(fc.time, "sleep", lambda _seconds: None)
+    try:
+        result = client.historical_kline_batch(["000001.SZ"], START, START)
+    finally:
+        client.close()
+    assert result == {"000001.SZ": [_bar()]}
+    assert len(calls) == 2
+
+
+def test_client_429_exhaustion_is_explicit(monkeypatch):
+    client, calls = _http_client(
+        monkeypatch,
+        lambda _request: httpx.Response(429, headers={"Retry-After": "0"}),
+    )
+    monkeypatch.setattr(fc._REQUEST_LIMITER, "wait", lambda: None)
+    monkeypatch.setattr(fc.time, "sleep", lambda _seconds: None)
+    try:
+        with pytest.raises(fc.FuyaoRateLimitError, match="重试 4 次后仍被限流"):
+            client.historical_kline_batch(["000001.SZ"], START, START)
+    finally:
+        client.close()
+    assert len(calls) == fc._RATE_LIMIT_RETRIES + 1
+
+
 @pytest.mark.parametrize("failure", ["wrong_adjust", "malformed", "not_found"])
 def test_provider_falls_back_from_rejected_http_batch_without_changing_price(monkeypatch, failure):
     def respond(request):
@@ -177,6 +212,25 @@ class _BatchClient:
         if symbol in self.errors:
             raise fc.FuyaoError("旧接口无权限")
         return [b for b in self.bars.get(symbol, []) if start_ms <= b["date_ms"] <= end_ms]
+
+
+def test_provider_does_not_fallback_to_single_requests_after_rate_limit(monkeypatch):
+    class _RateLimitedBatchClient(_BatchClient):
+        def historical_kline_batch(self, symbols, start_ms, end_ms):
+            self.batch_calls.append((list(symbols), start_ms, end_ms))
+            raise fc.FuyaoRateLimitError("HTTP 429", status_code=429, retry_after_s=0)
+
+    client = _RateLimitedBatchClient({"000001.SZ": [_bar()]})
+    provider = _provider(monkeypatch, client)
+    monkeypatch.setattr(fp, "_HIST_RATE_LIMIT_COOLDOWN_S", 0)
+    monkeypatch.setattr(fp.time, "sleep", lambda _seconds: None)
+    provider._daily_dump_info = _no_dump
+    with pytest.raises(ProviderRequestError, match="停止单票密集回退"):
+        provider.get_daily(
+            ["000001.SZ"], datetime(2026, 11, 6), datetime(2026, 11, 6)
+        )
+    assert client.single_calls == []
+    assert len(client.batch_calls) == 2
 
 
 def _provider(monkeypatch, client):

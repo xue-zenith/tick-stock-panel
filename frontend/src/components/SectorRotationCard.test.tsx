@@ -3,6 +3,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { waitForAct } from '@/test/actWait'
 import {
   SectorRotationCard,
   colorForSector,
@@ -134,9 +135,9 @@ async function renderCard(kind: 'concept' | 'industry' = 'industry', data = payl
     )
   })
   // react-query 的通知批处理需要多个微任务轮次, act 单次空 flush 不够 — 轮询等待
-  await vi.waitFor(() => {
+  await waitForAct(() => {
     expect(chart.setOption.mock.calls.length).toBeGreaterThan(0)
-  }, { timeout: 3000 })
+  }, 3000)
 }
 beforeEach(() => {
   vi.clearAllMocks()

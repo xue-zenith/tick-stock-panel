@@ -1232,7 +1232,7 @@ class FactorBacktestService:
             rets = rets[prev > 0]
             if rets.size:
                 # 样本标准差 (ddof=1), 与 engine 的 Sharpe 口径一致
-                std = float(np.std(rets, ddof=1))
+                std = float(np.std(rets, ddof=1)) if rets.size > 1 else 0.0
                 sharpe = float(np.mean(rets) / std) * np.sqrt(_ann) if std > 0 else 0.0
                 win_rate = float(np.mean(rets > 0))
             else:
@@ -1302,7 +1302,9 @@ class FactorBacktestService:
             config.rebalance,
             252,
         )
-        ls_std = float(np.std(ls_ret, ddof=1))  # 样本标准差, 与 engine 口径一致
+        # 单个收益点没有样本标准差; 按 Sharpe 不可计算处理为 0, 避免 NumPy
+        # 产生 NaN/RuntimeWarning 并把无意义的统计值传播到结果 JSON。
+        ls_std = float(np.std(ls_ret, ddof=1)) if ls_ret.size > 1 else 0.0
         sharpe = (
             float(np.mean(ls_ret) / ls_std) * np.sqrt(ann_factor)
             if ls_std > 1e-8

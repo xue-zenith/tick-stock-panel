@@ -12,7 +12,7 @@ import uuid
 import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date
@@ -1325,16 +1325,12 @@ def _mask_unseen_staging_fields(
 
 def _close_matrix_memmaps(mapped: list[np.memmap]) -> None:
     for values in reversed(mapped):
-        try:
+        with suppress(OSError, ValueError):
             values.flush()
-        except (OSError, ValueError):
-            pass
         mmap_obj = getattr(values, "_mmap", None)
         if mmap_obj is not None:
-            try:
+            with suppress(OSError, ValueError):
                 mmap_obj.close()
-            except (OSError, ValueError):
-                pass
 
 
 def _scan_matrix_values(
@@ -1634,7 +1630,7 @@ def _find_covering_matrix_cache(
                 continue
             if manifest.get("instrument_fingerprint") != instrument_fingerprint:
                 continue
-            if source_generation is not None:
+            if source_generation is not None:  # noqa: SIM102
                 if manifest.get("source_generation") != source_generation:
                     continue
             cached_start = date.fromisoformat(str(manifest["coverage_start"]))

@@ -812,14 +812,14 @@ function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: stri
     enabled: query.trim().length > 0,
     staleTime: 30_000,
   })
-  const results = search.data?.results ?? []
+  const results = useMemo(() => search.data?.results ?? [], [search.data?.results])
   // 自选列表 — 供「从自选导入」一键填入回测范围
   const watchlist = useQuery({
     queryKey: QK.watchlist,
     queryFn: () => api.watchlistList(),
     staleTime: 30_000,
   })
-  const watchlistEntries = watchlist.data?.symbols ?? []
+  const watchlistEntries = useMemo(() => watchlist.data?.symbols ?? [], [watchlist.data?.symbols])
   const watchlistCounts = useMemo(() => {
     // 多组并存: 一股计入每个所属分组
     const counts: Record<string, number> = { ungrouped: 0 }
@@ -1183,8 +1183,9 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   // 刷新页面后: 从 localStorage 恢复未完成的回测任务
   useEffect(() => {
     tryReconnect()
-
   }, [])
+
+  const isMinuteStrategyForSave = strategyDetail.data?.execution_backend === 'minute_filter'
 
   useEffect(() => {
     const detail = strategyDetail.data
@@ -1234,7 +1235,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
         positionPolicyParams,
         mode: simMode,
         holdingDays,
-        minuteFill: isMinuteStrategy ? false : highGranularity,
+        minuteFill: isMinuteStrategyForSave ? false : highGranularity,
         regimeStates,
         regimeMinScore,
         params: strategyParams,
@@ -1245,7 +1246,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
         result: backtestTask.result,
       })
     }
-  }, [backtestTask])
+  }, [backtestTask, selectedStrategy, symbols, assetType, start, end, matching, entryFill, exitFill, fees, stampTax, slippage, maxPositions, maxExposure, initialCapital, positionSizing, positionPolicyId, positionPolicyParams, simMode, holdingDays, isMinuteStrategyForSave, highGranularity, regimeStates, regimeMinScore, strategyParams, overrides, strategyDetail.data])
 
   const handleRun = (force = false) => {
     if (!selectedStrategy || backtestDataUnavailable) return

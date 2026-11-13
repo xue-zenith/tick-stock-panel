@@ -189,7 +189,7 @@ export function Regime() {
     queryFn: () => api.regimeStates(days),
     staleTime: 5 * 60 * 1000,
   })
-  const rows: RegimeRow[] = history.data?.rows ?? []
+  const rows = useMemo<RegimeRow[]>(() => history.data?.rows ?? [], [history.data?.rows])
   // 年数/自定义窗口通过 limit 拉取, 阶段与主线接口只接受日期边界。
   // 用已返回交易日收口, 避免主图为近一年、统计却混入全部历史。
   const detailStart = rows[0]?.date
@@ -216,7 +216,7 @@ export function Regime() {
 
   const latest = rows.length > 0 ? rows[rows.length - 1] : null
   const hasPhaseData = rows.length > 0 && rows.some(r => r.phase != null)
-  const segments = rows.length > 0 ? phases.data?.segments ?? [] : []
+  const segments = useMemo(() => rows.length > 0 ? phases.data?.segments ?? [] : [], [rows.length, phases.data?.segments])
 
   // 当前阶段持续天数(末尾连续同阶段) + 当前主线(最新交易日 top3)
   const phaseStreak = useMemo(() => {

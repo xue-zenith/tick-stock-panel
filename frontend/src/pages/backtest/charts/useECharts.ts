@@ -32,12 +32,15 @@ export function useECharts(
       instanceRef.current?.dispose()
       instanceRef.current = null
     }
-  }, [])
+  }, [chartRef])
 
   // 更新 option
+  // `deps` is a dynamic dependency list by design: callers can preserve chart state
+  // across changes that are not represented in the option object.
   useEffect(() => {
     if (!instanceRef.current || !option) return
     instanceRef.current.setOption(option, { notMerge: true })
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- dynamic dependency list is part of this hook's API
   }, [option, ...deps])
 
   return chartRef

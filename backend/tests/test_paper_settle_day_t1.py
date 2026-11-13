@@ -53,7 +53,7 @@ def test_settle_day_prevents_overnight_t1_unlock(tmp_path, monkeypatch):
 
     # 挂一个 close 卖单用于 settle_day 撮合 (不会成交因为 T+1)
     paper.create_order(tmp_path, SYM, "sell", qty=100, order_type="close", ref_price=10.8)
-    summary = paper.settle_day(tmp_path, TRADE_DAY.isoformat())
+    paper.settle_day(tmp_path, TRADE_DAY.isoformat())
 
     # settle_day 撮合后, positions.json 的 available_qty 应为 0
     # (因为 settle_day=TRADE_DAY, 当日买入不可卖)

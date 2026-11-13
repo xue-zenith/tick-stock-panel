@@ -37,7 +37,7 @@ def _reconcile_index_asset_type(rule: dict, repo) -> dict:
         return rule
     try:
         types = {repo.resolve_asset_type(s) for s in symbols}
-    except Exception:
+    except Exception:  # noqa: BLE001
         return rule
     if len(types) == 1:
         only = next(iter(types))
@@ -166,7 +166,7 @@ def get_options(request: Request):
                     ),
                     "label": cs.get("name", cs["id"]),
                 })
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
 
     sector_service = getattr(request.app.state, "sector_monitor_service", None)
@@ -325,7 +325,7 @@ def save_rule(req: RuleModel, request: Request):
         group_id = str(rule.get("group_id") or "")
         try:
             group_ids = {g["id"] for g in watchlist_service.list_groups()}
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             raise HTTPException(status_code=503, detail=f"自选分组读取失败: {e}") from e
         if group_id not in group_ids:
             raise HTTPException(status_code=400, detail="自选分组不存在或已被删除, 请重新选择")
@@ -381,7 +381,7 @@ def delete_rule(rule_id: str, request: Request):
 
 # ── 演示数据生成 (仅 Dev 页用) ─────────────────────────
 
-import time as _time
+import time as _time  # noqa: E402
 
 
 def _demo_rule(rule_id: str, name: str, rtype: str, scope: str, symbols: list[str],
@@ -457,7 +457,7 @@ def seed_demo_rules(request: Request):
     ts = int(_time.time() * 1000)
     created = []
     i = 0
-    for (name, rtype, scope, symbols, conditions, logic, severity, sev) in _DEMO_RULES_TEMPLATE:
+    for (name, rtype, scope, symbols, conditions, logic, _severity, sev) in _DEMO_RULES_TEMPLATE:
         rule_id = f"demo_{ts}_{i}"
         rule = _demo_rule(rule_id, name, rtype, scope, symbols, conditions, logic, 3600, sev)
         monitor_rules.save_one(_data_dir(request), rule)
@@ -706,7 +706,7 @@ def trigger_ladder(request: Request):
         raise HTTPException(status_code=400, detail="当前无 ladder 规则满足触发条件 (封单均 > 阈值)")
 
     # 1. 落盘到 alerts.jsonl
-    try:
+    try:  # noqa: SIM105
         alert_store.append_many(repo.store.data_dir, rule_events)
     except Exception:  # noqa: BLE001
         pass  # 落盘失败不阻断推送
@@ -720,14 +720,14 @@ def trigger_ladder(request: Request):
             "signals": ev["signals"], "severity": ev["severity"],
             "conditions": ev["conditions"], "logic": ev["logic"],
         } for ev in rule_events]
-        try:
+        try:  # noqa: SIM105
             quote_svc.push_alerts(sse_alerts)
         except Exception:  # noqa: BLE001
             pass
 
     # 3. 飞书推送
     if quote_svc:
-        try:
+        try:  # noqa: SIM105
             quote_svc._maybe_send_webhook(rule_events, engine)
         except Exception:  # noqa: BLE001
             pass

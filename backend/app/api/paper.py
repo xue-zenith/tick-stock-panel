@@ -54,6 +54,24 @@ def _paper_enriched_today(request: Request):
     return enriched, day
 
 
+def _paper_risk_data_ready(enriched, day) -> bool:
+    """判断 HRAE 诊断行情是否可用。
+
+    交易日必须使用当天快照；周末/节假日没有“当日”行情时，允许使用最近
+    一个有效交易日做只读诊断。自动退出仍只由实时行情快照驱动，不受此回退影响。
+    """
+    if enriched is None or enriched.is_empty() or day is None:
+        return False
+    from app.market_time import cn_today
+    today = cn_today()
+    if day == today:
+        return True
+    if day > today:
+        return False
+    from app.services import trading_day
+    return today.weekday() >= 5 or trading_day.is_trading_day() is False
+
+
 class AccountModel(BaseModel):
     initial_cash: float
     account_id: str = paper.DEFAULT_ACCOUNT_ID
@@ -436,13 +454,12 @@ def risk_snapshot(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_I
         return {"available": False, "reason": "实时行情服务不可用"}
     try:
         enriched, day = _paper_enriched_today(request)
-        from app.market_time import cn_today
-        if enriched.is_empty() or day != cn_today():
-            return {"available": False, "reason": "当日标准化行情尚未就绪"}
+        if not _paper_risk_data_ready(enriched, day):
+            return {"available": False, "reason": "当日标准化行情尚未就绪", "data_date": str(day) if day else None}
         snapshot = paper_auto.get_hrae_risk_snapshot(
             _data_dir(request), enriched.to_dicts(), _acc(request, account),
         )
-        return {"available": snapshot is not None, "snapshot": snapshot}
+        return {"available": snapshot is not None, "data_date": str(day), "snapshot": snapshot}
     except Exception as e:  # noqa: BLE001
         logger.warning("paper risk snapshot failed: %s", e)
         return {"available": False, "reason": "风险快照暂时不可用"}
@@ -458,13 +475,12 @@ def risk_proposal(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_I
         return {"available": False, "reason": "实时行情服务不可用"}
     try:
         enriched, day = _paper_enriched_today(request)
-        from app.market_time import cn_today
-        if enriched.is_empty() or day != cn_today():
-            return {"available": False, "reason": "当日标准化行情尚未就绪"}
+        if not _paper_risk_data_ready(enriched, day):
+            return {"available": False, "reason": "当日标准化行情尚未就绪", "data_date": str(day) if day else None}
         preview = paper_auto.get_hrae_risk_preview(
             _data_dir(request), enriched.to_dicts(), _acc(request, account),
         )
-        return {"available": preview is not None, "preview": preview}
+        return {"available": preview is not None, "data_date": str(day), "preview": preview}
     except Exception as e:  # noqa: BLE001 - preview endpoint fails closed
         logger.warning("paper HRAE Agent proposal failed: %s", e)
         return {"available": False, "reason": "Agent 风险预览暂时不可用"}

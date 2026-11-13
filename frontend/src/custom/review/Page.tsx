@@ -9,7 +9,7 @@
  * 归属: 扩展域消费页 (官方), 经 custom/review/extension.tsx 注册路由与导航;
  * 对核心能力均为只读 import (api/QK/组件/状态库), 不承载核心域语义。
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -104,7 +104,7 @@ export function ReviewPage() {
   // ===== 定时复盘 =====
   const [showSchedule, setShowSchedule] = useState(false)
   const prefs = usePreferences()
-  const reviewSched = prefs.data?.review_schedule ?? { enabled: false, hour: 15, minute: 10 }
+  const reviewSched = useMemo(() => prefs.data?.review_schedule ?? { enabled: false, hour: 15, minute: 10 }, [prefs.data?.review_schedule])
   const feishuConfigured = !!(prefs.data?.feishu_webhook_url)
   const wecomConfigured = !!(prefs.data?.wecom_webhook_url)
   const customConfigured = !!(prefs.data?.custom_webhook_url)
@@ -116,7 +116,7 @@ export function ReviewPage() {
   )
   // 推送渠道是独立的顶层偏好(多选), 与定时 / 实时行情无关, 常驻可单独设置
   // []=不推送; 可多选飞书、企微、第三方 Webhook 和邮件。
-  const reviewPushChannels = prefs.data?.review_push_channels ?? []
+  const reviewPushChannels = useMemo(() => prefs.data?.review_push_channels ?? [], [prefs.data?.review_push_channels])
   // 推送触发方式: auto=归档即推; manual=仅归档不自动外发。默认 manual。
   const reviewPushMode = prefs.data?.review_push_mode ?? 'manual'
   // 弹窗内的本地草稿: 开关和时间都在本地改, 点「保存」才真正提交(避免开关一拨就关弹窗)

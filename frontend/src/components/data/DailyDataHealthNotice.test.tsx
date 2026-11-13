@@ -28,7 +28,7 @@ function health(blocking: string[] = [], stock = 'new', etf = '0') {
 
 it('已知异常可在其他页面看到处理入口', async () => {
   health(['stock'])
-  await act(async () => root.render(<QueryClientProvider client={client}><MemoryRouter><DailyDataHealthNotice /></MemoryRouter></QueryClientProvider>))
+  await act(async () => root.render(<QueryClientProvider client={client}><MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><DailyDataHealthNotice /></MemoryRouter></QueryClientProvider>))
   expect(host.textContent).toContain('股票日K存在未完成的修补或重算')
   expect(host.querySelector('a')?.getAttribute('href')).toBe('/data')
 })

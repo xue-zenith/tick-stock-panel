@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from datetime import date
-from typing import AsyncIterator
 
 from app.services.market_overview_builder import build_market_overview
 
@@ -327,10 +327,9 @@ async def recap_market_stream(
 
     # 3+4. 构建 prompt + 流式调用 LLM(整体 try-except,任何异常 yield error,避免前端卡死)
     try:
-        from app.services.ai_provider import stream_ai_text
-
         # 龙虎榜摘要 (fuyao 专有): 拉取失败/未配置 → 空串, 复盘主流程不受影响
         from app.services import dragon_tiger as dragon_tiger_svc
+        from app.services.ai_provider import stream_ai_text
 
         lhb_ctx = dragon_tiger_svc.build_recap_context(repo.store.data_dir)
 
@@ -353,7 +352,7 @@ async def recap_market_stream(
             got_content = True
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
 
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.exception("AI market recap failed for %s: %s", as_of_str, e)
         yield json.dumps({"type": "error", "message": f"AI 复盘失败: {e}"}, ensure_ascii=False)
         return

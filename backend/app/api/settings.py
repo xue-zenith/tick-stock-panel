@@ -956,7 +956,7 @@ def test_data_source(req: CustomSourceTestIn) -> dict:
         else:
             provider = custom_sources.get_provider(req.provider)
         return provider.test_dataset(req.dataset, req.symbols)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise HTTPException(status_code=400, detail=f"自定义数据源测试失败: {e}") from e
     finally:
         if temporary and provider is not None:
@@ -1347,7 +1347,7 @@ def update_realtime_monitor_config(req: RealtimeMonitorConfigIn, request: Reques
                     mr_store.migrate_strategy_monitors(data_dir, [], {})
                 # reload 规则到引擎
                 monitor_engine.set_rules(mr_store.load_all(data_dir))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
 
     return result
@@ -2246,7 +2246,7 @@ def update_review_schedule(req: ReviewScheduleIn, request: Request) -> dict:
             try:
                 scheduler.remove_job(REVIEW_JOB_ID)
                 logger.info("scheduled_review disabled (job removed)")
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass  # job 本就不存在(从未开过), 无需处理
 
     return sched
@@ -2386,7 +2386,7 @@ def sound_packs_list(request: Request) -> dict:
 
 
 @router.post("/sound-packs")
-async def sound_packs_upload(request: Request, file: UploadFile = File(...)) -> dict:
+async def sound_packs_upload(request: Request, file: UploadFile = File(...)) -> dict:  # noqa: B008
     import re
 
     raw = file.filename or ""

@@ -68,7 +68,7 @@ def load() -> dict:
         data = json.loads(p.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning("preferences.json malformed: %s", e)
         return {}
     _cache = data
@@ -142,7 +142,7 @@ def get_minute_intraday_refresh() -> bool:
     try:
         from app.services.quote_service import QuoteService
         return QuoteService.is_realtime_allowed()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -512,7 +512,7 @@ def get_mainline_blacklist() -> list[str]:
     """
     v = load().get("mainline_blacklist", [])
     if isinstance(v, str):
-        v = [part for part in re.split(r"[,，、;；\s]+", v) if part]  # noqa: RUF001
+        v = [part for part in re.split(r"[,，、;；\s]+", v) if part]
     if not isinstance(v, list):
         return []
     return [str(x).strip() for x in v if str(x).strip()]
@@ -587,7 +587,7 @@ def set_mainline_filter_config(cfg: dict) -> dict:
     if "blacklist" in cfg and cfg["blacklist"] is not None:
         raw = cfg["blacklist"]
         if isinstance(raw, str):
-            raw = [part for part in re.split(r"[,，、;；\s]+", raw) if part]  # noqa: RUF001
+            raw = [part for part in re.split(r"[,，、;；\s]+", raw) if part]
         updates["mainline_blacklist"] = [str(x).strip() for x in (raw or []) if str(x).strip()]
     if updates:
         save(updates)

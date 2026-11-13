@@ -463,8 +463,9 @@ def test_save_ai_settings_persists_token_sizes(monkeypatch):
 
 
 def test_save_ai_settings_rejects_non_positive(monkeypatch):
-    from app.api import settings as settings_api
     from fastapi import HTTPException
+
+    from app.api import settings as settings_api
 
     req = settings_api.AiSettingsIn(provider="openai_compat", max_output_tokens=-1)
     with pytest.raises(HTTPException):

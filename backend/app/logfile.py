@@ -85,10 +85,8 @@ def _migrate_legacy(log_dir, filename: str) -> None:
         dst = log_dir / name
         if dst.exists():
             continue
-        try:
+        with contextlib.suppress(OSError):
             os.replace(src, dst)
-        except OSError:
-            pass
 
 
 def attach_rotating_log(filename: str, *, max_mb: int, backup_count: int) -> None:

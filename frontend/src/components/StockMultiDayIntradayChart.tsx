@@ -115,7 +115,7 @@ export function StockMultiDayIntradayChart({
     if ((autoSyncFailsRef.current.get(key) ?? 0) >= 2) return  // 连续失败达上限, 停止自动重试(提示条保留手动重试)
     autoSyncRef.current = key
     syncMinute.mutate()
-  }, [symbol, days, localSessionCount, loading, isIndex, history.error, history.isPlaceholderData, syncMinute.isPending])
+  }, [symbol, days, localSessionCount, loading, isIndex, history.error, history.isPlaceholderData, syncMinute])
 
   const chartHeight = Math.max(260, height - (showCoverage || syncMinute.isPending ? 32 : 0))
   const Chart = renderer === 'lightweight' ? LightweightIntraday : EChartsMultiDayIntraday

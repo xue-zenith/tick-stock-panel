@@ -408,7 +408,7 @@ export function restoreColumnsFromBaseline(
   const snapById = new Map(snapshot.map(c => [c.id, c]))
   const restored = current.map(c => {
     if (c.pinned) return c
-    const { candleConfig, intradayConfig, extDisplay, standalone, ...rest } = c
+    const { candleConfig: _candleConfig, intradayConfig: _intradayConfig, extDisplay: _extDisplay, standalone: _standalone, ...rest } = c
     const saved = snapById.get(c.id)
     if (!saved) return { ...rest, visible: false }
     return {

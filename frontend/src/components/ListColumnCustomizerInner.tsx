@@ -425,7 +425,7 @@ function extGranularityOf(
       if (id) defaultVisible.add(id)
     }
     const next = prev.map(c => {
-      const { candleConfig, intradayConfig, extDisplay, standalone, ...rest } = c
+      const { candleConfig: _candleConfig, intradayConfig: _intradayConfig, extDisplay: _extDisplay, standalone: _standalone, ...rest } = c
       if (c.pinned) return c
       if (c.source.type === 'ext') return { ...rest, visible: false }
       return { ...rest, visible: defaultVisible.has(c.id) }
@@ -483,7 +483,7 @@ function extGranularityOf(
       // (与既有空对象保留行为一致); 彻底取消联动走共享块的高度联动开关。
       const link = c.intradayConfig?.link
       if (link) return { ...c, intradayConfig: { link } }
-      const { intradayConfig, ...rest } = c
+      const { intradayConfig: _intradayConfig, ...rest } = c
       return rest
     }))
   }, [])

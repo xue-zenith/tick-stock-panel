@@ -79,7 +79,7 @@ async function toggleWithCachedPermission(cachedAllowed: boolean, currentAllowed
   client.setQueryData(QK.quoteStatus, status(cachedAllowed))
   vi.mocked(api.quoteStatus).mockResolvedValue(status(currentAllowed))
   await act(async () => root.render(
-    <MemoryRouter><QueryClientProvider client={client}><Layout /></QueryClientProvider></MemoryRouter>,
+    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={client}><Layout /></QueryClientProvider></MemoryRouter>,
   ))
   const button = host.querySelector<HTMLButtonElement>('button[aria-label="开启实时行情"]')
   expect(button).not.toBeNull()
@@ -114,7 +114,7 @@ it.each(['succeeded', 'failed'] as const)('离开数据页后, 分钟补拉 %s �
   const unaffected = QK.indexMinute('000001.SH', '2026-10-20')
   client.setQueryData(unaffected, {})
   await act(async () => root.render(
-    <MemoryRouter><QueryClientProvider client={client}><Layout /></QueryClientProvider></MemoryRouter>,
+    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={client}><Layout /></QueryClientProvider></MemoryRouter>,
   ))
   await act(async () => { await new Promise(r => setTimeout(r, 20)) })
   keys.forEach(key => expect(client.getQueryState(key)?.isInvalidated).toBe(true))

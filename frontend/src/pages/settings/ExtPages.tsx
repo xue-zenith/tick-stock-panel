@@ -52,7 +52,7 @@ export function SettingsExtPagesPanel() {
   const [error, setError] = useState('')
 
   const activeConfig = configs.find(c => c.id === dataSource) ?? configs[0]
-  const fields = activeConfig?.fields ?? []
+  const fields = useMemo(() => activeConfig?.fields ?? [], [activeConfig?.fields])
   const numericFields = useMemo(() => fields.filter(f => f.dtype === 'int' || f.dtype === 'float'), [fields])
 
   const resetForm = () => {

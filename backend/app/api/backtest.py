@@ -52,7 +52,7 @@ def _get_engine(request: Request):
 
 def _resolve_start(req: BaseModel, end: date, default_days: int) -> date:
     """未传 start 使用默认区间；显式传 null/空值表示全部历史。"""
-    start = getattr(req, "start")
+    start = req.start
     if start is not None:
         return start
     if "start" in req.model_fields_set:
@@ -300,7 +300,7 @@ def _raise_candidate_error(exc: Exception) -> None:
 def candidates_list():
     try:
         return {"items": _candidate_store().list()}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         _raise_candidate_error(exc)
 
 
@@ -316,7 +316,7 @@ def candidate_create(req: CandidateCreateRequest):
             data_as_of=req.data_as_of.isoformat() if req.data_as_of else None,
             status=req.status,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         _raise_candidate_error(exc)
 
 
@@ -328,7 +328,7 @@ def candidate_update(candidate_id: str, req: CandidateUpdateRequest):
         return _candidate_store().update(candidate_id, name=req.name, status=req.status)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="候选方案不存在") from exc
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         _raise_candidate_error(exc)
 
 
@@ -339,7 +339,7 @@ def candidate_delete(candidate_id: str):
         return {"ok": True}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="候选方案不存在") from exc
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         _raise_candidate_error(exc)
 
 
@@ -457,8 +457,8 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
 
 # ── SSE 流式回测 (实时进度 + 可取消 + 支持重连) ───────────────────
 
-import hashlib
-import time
+import hashlib  # noqa: E402
+import time  # noqa: E402
 
 
 def _daily_data_revisions() -> dict[str, str]:
@@ -488,8 +488,19 @@ def strategy_run_evidence(run_id: str):
 
 class _BacktestJob:
     """单个回测任务的状态, 存模块级供重连使用。"""
-    __slots__ = ("key", "cancel_event", "progress", "result", "error", "done", "finish_ts",
-                 "daily_data_revisions", "started", "expiry_timer", "__weakref__")
+    __slots__ = (
+        "__weakref__",
+        "cancel_event",
+        "daily_data_revisions",
+        "done",
+        "error",
+        "expiry_timer",
+        "finish_ts",
+        "key",
+        "progress",
+        "result",
+        "started",
+    )
 
     def __init__(self, key: str):
         self.key = key
@@ -803,7 +814,7 @@ async def strategy_stream(
                     _finish_job(job, result=result)
                 except HeavyJobCancelledError:
                     _finish_job(job, error="回测已取消")
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     _finish_job(job, error=str(e))
 
             # 启动后台线程 (不阻塞事件循环)
@@ -1189,7 +1200,7 @@ async def optimize_robust_stream(
                         _finish_job(job, result=result)
                     except HeavyJobCancelledError:
                         _finish_job(job, error="优化已取消")
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001
                         _finish_job(job, error=str(e))
 
                 _start_job_thread(job, _run_robust)
@@ -1399,7 +1410,7 @@ async def walkforward_stream(
                         _finish_job(job, result=result)
                     except HeavyJobCancelledError:
                         _finish_job(job, error="walk-forward 已取消")
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001
                         _finish_job(job, error=str(e))
 
                 _start_job_thread(job, _run_wf)

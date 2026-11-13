@@ -75,7 +75,7 @@ async function renderPage() {
   const errors: unknown[] = []
   const spy = vi.spyOn(console, 'error').mockImplementation((...args) => { errors.push(args) })
   await act(async () => root.render(
-    <MemoryRouter><QueryClientProvider client={client}><Data /></QueryClientProvider></MemoryRouter>,
+    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={client}><Data /></QueryClientProvider></MemoryRouter>,
   ))
   await act(async () => { await new Promise(r => setTimeout(r, 60)) })
   spy.mockRestore()
@@ -120,7 +120,7 @@ it('统计后台刷新时每 2 秒重查, 完成后恢复正常轮询间隔', as
     ...busyStatus, indicators_ready: true, stats_pending: false,
   })
   await act(async () => root.render(
-    <MemoryRouter><QueryClientProvider client={client}><Data /></QueryClientProvider></MemoryRouter>,
+    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={client}><Data /></QueryClientProvider></MemoryRouter>,
   ))
   await act(async () => { await vi.advanceTimersByTimeAsync(2_002) })
   expect(api.dataStatus).toHaveBeenCalledTimes(2)

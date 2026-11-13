@@ -49,10 +49,7 @@ def _detect_backend() -> str | None:
     elif sys.platform == "darwin":
         # 优先 terminal-notifier (标题/分组更清晰), 不可用则 osascript 兜底。
         # terminal-notifier 需在系统设置 → 通知里授权, 未授权时自动降级。
-        if shutil.which("terminal-notifier"):
-            backend = "terminal-notifier"
-        else:
-            backend = "osascript"
+        backend = "terminal-notifier" if shutil.which("terminal-notifier") else "osascript"
     elif sys.platform.startswith("linux"):
         backend = "notify-send"
 
@@ -124,7 +121,7 @@ def _notify_terminal_notifier(title: str, message: str) -> bool:
     "terminal-notifier" (比 osascript 的"脚本编辑器"更直观)。需在系统
     设置 → 通知里授权; 未授权时返回 False, 由上层回退到 osascript。
     """
-    result = subprocess.run(  # noqa: S603, S607
+    result = subprocess.run(
         [
             "terminal-notifier",
             "-title", f"{_APP_TITLE} · {title}",
@@ -157,7 +154,7 @@ def _notify_osascript(title: str, message: str) -> bool:
     script = (
         f'display notification "{safe_msg}" with title "{safe_title}"'
     )
-    result = subprocess.run(  # noqa: S603, S607
+    result = subprocess.run(
         ["osascript", "-e", script],
         capture_output=True,
         timeout=5,
@@ -171,7 +168,7 @@ def _notify_notify_send(title: str, message: str, icon: Path | None) -> bool:
     if icon and Path(icon).exists():
         args.extend(["--icon", str(icon)])
     args.append(message)
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(
         args,
         capture_output=True,
         timeout=5,

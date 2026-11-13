@@ -124,7 +124,7 @@ def _prev_daily_close(data_dir: Path, target_date: str) -> pl.DataFrame | None:
         return None
     try:
         df = pl.read_parquet(daily / f"date={prevs[-1]}" / "part.parquet", columns=["symbol", "close"])
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     return (
         df.with_columns(_bare().alias("_bare"))
@@ -145,11 +145,11 @@ def _minute_pcts(minute_dir: Path, target: str) -> tuple[pl.DataFrame | None, st
     try:
         bars = pl.read_parquet(path, columns=["symbol", "datetime", "close", "amount"])
         has_amount = True
-    except Exception:
+    except Exception:  # noqa: BLE001
         try:
             bars = pl.read_parquet(path, columns=["symbol", "datetime", "close"])
             has_amount = False
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("sector_rotation read minute partition failed: %s", exc)
             return None, "minute_schema", False
     # close <= 0 / 非有限的分钟行无效: 作基准时 pct 为 inf, 作分子时是 -100% 假跌幅
@@ -202,7 +202,7 @@ def _load_sector_flow(data_dir: Path, flow_field: str) -> pl.DataFrame | None:
         return None
     try:
         config = ExtConfigStore(data_dir).get(config_id)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if config is None:
         return None
@@ -218,7 +218,7 @@ def _load_sector_flow(data_dir: Path, flow_field: str) -> pl.DataFrame | None:
         return None
     try:
         df = pl.read_parquet(path)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if df.is_empty() or column not in df.columns:
         return None

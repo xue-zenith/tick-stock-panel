@@ -35,7 +35,7 @@ def test_user_prompt_etf_no_financials():
 
 def test_user_prompt_injects_paper_position():
     """模拟盘持有该标的: 注入持仓数量/成本/浮盈, 并要求 AI 给持仓建议。"""
-    from app.services.stock_analyzer import _paper_position_part, _build_user_prompt
+    from app.services.stock_analyzer import _build_user_prompt, _paper_position_part
 
     part = _paper_position_part([{"account_id": "default", "qty": 1000, "avg_cost": 10.0}],
                                 close=11.0, raw_close=11.0)

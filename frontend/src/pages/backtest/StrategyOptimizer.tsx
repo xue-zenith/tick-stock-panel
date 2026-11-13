@@ -78,7 +78,6 @@ export function StrategyOptimizer() {
   // 刷新/切页后: 恢复未完成的稳健优化任务
   useEffect(() => {
     tryReconnectRobust()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // 折预览: 运行前实时显示验证窗切分 (不回测)

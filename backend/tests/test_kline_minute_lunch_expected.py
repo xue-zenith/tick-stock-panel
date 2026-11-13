@@ -73,8 +73,8 @@ class _FakeRepo:
         self._bars = bars
         # /minute 与 /minute-batch 读取 repo.store.data_dir 判断分钟基准标记
         import tempfile
-        from types import SimpleNamespace
         from pathlib import Path
+        from types import SimpleNamespace
         self.store = SimpleNamespace(data_dir=Path(tempfile.mkdtemp()))
 
     def resolve_asset_type(self, symbol: str) -> str:

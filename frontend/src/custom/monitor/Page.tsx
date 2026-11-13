@@ -147,10 +147,10 @@ export function Monitor() {
   // (TickFlow 无有效 Key, 或路由源未就绪) — 监控/预警收不到最新价, 顶部提示去数据源配置。
   const { data: quoteStatus } = useQuoteStatus()
   const realtimeUnavailable = quoteStatus?.mode === 'none'
-  const monitorExtFields = prefs?.monitor_ext_fields ?? {
+  const monitorExtFields = useMemo(() => prefs?.monitor_ext_fields ?? {
     concept: { field: 'ext_gn_ths.所属概念' },
     industry: { field: 'ext_hy_ths.所属同花顺行业' },
-  }
+  }, [prefs?.monitor_ext_fields])
   const [extConfigOpen, setExtConfigOpen] = useState(false)
   const extColumnsParam = useMemo(() => {
     const parts = [monitorExtFields.concept?.field, monitorExtFields.industry?.field].filter(Boolean) as string[]
@@ -194,7 +194,6 @@ export function Monitor() {
     enterTsRef.current = Date.now()
     markSeen()
     return () => leaveMonitorPage()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   return (
@@ -377,7 +376,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
     }
   }
 
-  const events = (alertsQuery.data as any)?.alerts ?? []
+  const events = useMemo(() => (alertsQuery.data as any)?.alerts ?? [], [alertsQuery.data])
 
   // 切股导航列表: 有 symbol 的触发记录 (按展示顺序)
   const alertsNavItems = useMemo(
@@ -712,7 +711,7 @@ function RulesList({ rulesQuery, onEdit }: {
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const customNames = useCustomSignalNames()
 
-  const rules: MonitorRule[] = (rulesQuery.data as any)?.rules ?? []
+  const rules: MonitorRule[] = useMemo(() => (rulesQuery.data as any)?.rules ?? [], [rulesQuery.data])
 
   // 分组作用域规则: 拉取分组定义与成员, 展示分组名/成员数 chip (点击跳转自选页对应分组)
   const hasGroupRules = rules.some(r => r.scope === 'watchlist_group')
@@ -753,7 +752,7 @@ function RulesList({ rulesQuery, onEdit }: {
     enabled: allSymbols.length > 0,
     staleTime: 300000,
   })
-  const symbolNames = namesQuery.data?.names ?? {}
+  const symbolNames = useMemo(() => namesQuery.data?.names ?? {}, [namesQuery.data?.names])
 
   // 切股导航列表: 个股规则 (取第一个 symbol, 按展示顺序)
   const rulesNavItems = useMemo(

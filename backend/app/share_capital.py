@@ -20,7 +20,7 @@ def load_share_history(data_dir: Path) -> pl.DataFrame:
         if not {"symbol", "period_end", "float_shares"} <= set(shares.columns):
             return pl.DataFrame()
         return shares
-    except Exception:
+    except Exception:  # noqa: BLE001
         return pl.DataFrame()
 
 

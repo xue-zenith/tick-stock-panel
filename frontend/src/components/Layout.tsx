@@ -504,7 +504,7 @@ export function Layout() {
     // 复用常驻的任务轮询, 离开数据页后补拉结束也会刷新; 取消/失败可能已写入部分数据。
     qc.invalidateQueries({ predicate: q => MINUTE_DATA_QUERY_PREFIXES.has(String(q.queryKey[0])) })
     qc.invalidateQueries({ queryKey: QK.dataStatus })
-  }, [latestDataJob?.id, latestDataJob?.status, qc])
+  }, [latestDataJob, qc])
   const navigate = useNavigate()
   const version = versionData?.version
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false

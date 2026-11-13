@@ -324,7 +324,7 @@ def _partition_snapshot_defects(
                 active_symbols.update(active["symbol"].drop_nulls().to_list())
             elif active.height > 0:
                 return None  # 无 symbol 列却存在成交残留, 无法定位 → 整分区保守判坏
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.debug("snapshot residue scan skipped %s: %s", path, e)
             return None
 
@@ -702,7 +702,7 @@ def launch_integrity_repair(
                 job_store.succeed(job_id, result)
         except JobCancelledError:
             pass  # 已由 terminate() 标记失败
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.exception("integrity repair failed: job_id=%s", job_id)
             job_store.fail(job_id, str(e))
         finally:
@@ -718,7 +718,7 @@ def launch_integrity_repair(
         async def task() -> None:
             await loop.run_in_executor(None, _execute)
 
-        asyncio.create_task(task())
+        asyncio.create_task(task())  # noqa: RUF006
     except RuntimeError:
         threading.Thread(
             target=_execute, daemon=True, name=f"integrity-repair-{job_id[:8]}"

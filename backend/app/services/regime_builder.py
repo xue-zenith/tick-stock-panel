@@ -343,6 +343,7 @@ def _compute_batch(repo, enriched_dir, instruments, historical_shares,
     返回目标区间(不含 warmup)的含指标列 DataFrame。
     """
     from datetime import timedelta
+
     from app.indicators.pipeline import compute_indicators, compute_limit_signals
     warmup_start = batch_start - timedelta(days=warmup_days)
     df = scan_enriched_parquet(enriched_dir / "**" / "*.parquet").filter(
@@ -479,7 +480,7 @@ def run_regime_batch(repo, start: date, end: date) -> pl.DataFrame:
     try:
         from app.services import preferences as _prefs_st
         exclude_st = _prefs_st.get_sentiment_exclude_st()
-    except Exception:
+    except Exception:  # noqa: BLE001
         exclude_st = True
     excluded_symbols: list[str] = []
     if exclude_st:
@@ -562,7 +563,7 @@ def refresh_phase_labels(data_dir: Path, *, start: date | None = None) -> int:
         return 0
     try:
         labeled = classify_phase_series(df)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning("refresh_phase_labels failed: %s", e)
         return 0
     if start is not None:

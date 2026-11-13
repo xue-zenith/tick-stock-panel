@@ -58,7 +58,7 @@ export function ResourceTransferDialog({ kind, initialMode = 'import', exportOnl
     }
   }, [catalog.data, catalog.isSuccess, catalog.isFetching, mode, selected, busy])
 
-  const entries = preview?.entries ?? []
+  const entries = useMemo(() => preview?.entries ?? [], [preview?.entries])
   const effective = useMemo(() => resourceClosure(entries, selected), [entries, selected])
   const included = entries.filter(entry => effective.has(entry.key))
   const conflicts = mode === 'import' ? included.filter(entry => entry.action === 'conflict') : []

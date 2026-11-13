@@ -150,7 +150,7 @@ def _normalize_thresholds(th: dict) -> None:
         val = _finite(th.get(key))
         th[key] = NEUTRAL if val is None else max(0.0, min(100.0, val))
     values = sorted((th[k] for k in th), reverse=True)
-    for (key, _), val in zip(LABELS, values):
+    for (key, _), val in zip(LABELS, values, strict=False):
         th[key] = val
 
 

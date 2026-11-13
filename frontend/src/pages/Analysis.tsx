@@ -50,7 +50,7 @@ export function Analysis() {
   const menuItems = menus.data?.items ?? []
 
   const activeConfig = configs.find(c => c.id === dataSource) ?? configs[0]
-  const fields = activeConfig?.fields ?? []
+  const fields = useMemo(() => activeConfig?.fields ?? [], [activeConfig?.fields])
 
   const resetForm = () => {
     const cfg = configs[0]

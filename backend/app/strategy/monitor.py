@@ -16,8 +16,9 @@ import logging
 import math
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 import polars as pl
 
@@ -189,7 +190,7 @@ class StrategyMonitorService:
         if self._alert_handler:
             try:
                 self._alert_handler(alert)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning("alert handler failed: %s", e)
 
     @staticmethod
@@ -306,10 +307,7 @@ def _build_condition_mask(df: pl.DataFrame, conditions: list[dict], logic: str) 
             return df.head(0)
     if not parts:
         return df.head(0)
-    if logic == "or":
-        mask = pl.any_horizontal(parts)
-    else:
-        mask = pl.all_horizontal(parts)
+    mask = pl.any_horizontal(parts) if logic == "or" else pl.all_horizontal(parts)
     return df.filter(mask)
 
 
@@ -346,9 +344,9 @@ class MonitorRuleEngine:
         # 历史窗口加载器: (target_date, lookback_days) → 多日 enriched DataFrame。
         # 用于声明 filter_history 的策略 (如反包), 实时监控时拼历史窗口 + 今日行情跑策略。
         # 为 None 时, filter_history 策略仍会被跳过 (保持旧行为, 不破坏无历史场景)。
-        self._history_loader: Callable[[_dt.date, int], "pl.DataFrame"] | None = None
+        self._history_loader: Callable[[_dt.date, int], pl.DataFrame] | None = None
         # ETF 版历史窗口加载器 (asset_type=etf 的规则用)。为 None 时 ETF filter_history 策略跳过。
-        self._history_loader_etf: Callable[[_dt.date, int], "pl.DataFrame"] | None = None
+        self._history_loader_etf: Callable[[_dt.date, int], pl.DataFrame] | None = None
         self._active_matrix_snapshots: dict[str, Any] = {}
         # 本轮 evaluate() 产出的策略结果: strategy_id → {rows, total, as_of}
         # 供策略页实时回显复用 (/api/screener/cached 端点直接读取, 避免重跑)。
@@ -653,7 +651,7 @@ class MonitorRuleEngine:
                     continue
                 try:
                     strategy = self._strategy_engine.get(sid)
-                except Exception:
+                except Exception:  # noqa: BLE001
                     continue
                 if getattr(strategy, "execution_backend", "polars_expr") != "matrix_native":
                     continue
@@ -711,7 +709,7 @@ class MonitorRuleEngine:
                         overrides_map=overrides_map,
                     )
                 self._active_matrix_snapshots[asset_type] = snapshot
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 self._active_matrix_snapshots.pop(asset_type, None)
                 logger.warning("%s 矩阵策略实时缓存准备失败: %s", asset_type, e)
 
@@ -728,7 +726,7 @@ class MonitorRuleEngine:
                 continue
             try:
                 events.extend(self._evaluate_rule(df, rule, now))
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning("规则评估失败 %s: %s", rule_id, e)
 
         # 一次性提交本轮结果 (原子替换): /cached 读方要么拿到上一轮完整结果,
@@ -1176,7 +1174,7 @@ class MonitorRuleEngine:
             if self._alert_handler:
                 try:
                     self._alert_handler(ev)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     logger.warning("alert handler failed: %s", e)
 
         return events
@@ -1227,7 +1225,7 @@ class MonitorRuleEngine:
         pool_key = (str(rule.get("id", sid)), sid, at)
         try:
             s = self._strategy_engine.get(sid)
-        except Exception:
+        except Exception:  # noqa: BLE001
             # 规则引用了不存在的策略(内置策略已下线): 静默空转最容易骗人,
             # 至少留一条 debug 线索, 避免"看起来在监控其实什么都没跑" (#490)
             logger.debug("monitor: 策略 %s 不存在, 规则 %s 本轮跳过", sid, rule.get("id"))
@@ -1238,9 +1236,9 @@ class MonitorRuleEngine:
         # 运行策略: 复用当前 enriched DataFrame 跳过数据加载
         overrides = {}
         if self._data_dir:
-            try:
+            try:  # noqa: SIM105
                 overrides = _strategy_config.load_override(self._data_dir, sid)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
 
         # 声明 filter_history 的策略 (如反包) 需要多日历史窗口才能判定形态。
@@ -1326,7 +1324,7 @@ class MonitorRuleEngine:
                         [hist_df, df], how="diagonal_relaxed"
                     ),
                 )
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning("策略 %s 加载历史窗口失败, 跳过: %s", sid, e)
                 return []
         try:
@@ -1340,7 +1338,7 @@ class MonitorRuleEngine:
                 params={**dict(overrides.get("params") or {}),
                         "__realtime_monitor": getattr(self, "_active_matrix_snapshots", {}).get(at) is not None},
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning("策略 %s 执行失败: %s", sid, e)
             return []
 
@@ -1394,7 +1392,7 @@ class MonitorRuleEngine:
         try:
             for row in df.iter_rows(named=True):
                 row_map.setdefault(str(row.get("symbol", "")), row)
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
         entry_signal_hits = result.entry_signal_hits

@@ -10,8 +10,11 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
+from email.utils import parsedate_to_datetime
 from pathlib import Path
+from threading import Lock
 
 import httpx
 
@@ -25,15 +28,66 @@ HISTORICAL_BATCH_LIMIT = 10
 _SNAPSHOT_PAGE_SIZE = 6000
 _SNAPSHOT_MAX_PAGES = 50
 _PAGE_INTERVAL_S = 0.15  # 页间隔, 降低触发限频 (code=4001) 的概率
+_REQUEST_INTERVAL_S = 0.35  # 全局扶摇请求最小间隔, 覆盖同进程内所有客户端
+_RATE_LIMIT_RETRIES = 4
+_RATE_LIMIT_BACKOFF_S = 1.0
+_RATE_LIMIT_MAX_SLEEP_S = 30.0
+
+
+class _RequestRateLimiter:
+    """进程级令牌桶: 多线程共享同一条扶摇请求时间轴。"""
+
+    def __init__(self, interval_s: float) -> None:
+        self.interval_s = interval_s
+        self._next_at = 0.0
+        self._lock = Lock()
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            wait_s = max(0.0, self._next_at - now)
+            self._next_at = max(now, self._next_at) + self.interval_s
+        if wait_s:
+            time.sleep(wait_s)
+
+
+_REQUEST_LIMITER = _RequestRateLimiter(_REQUEST_INTERVAL_S)
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return max(0.0, retry_at - time.time())
 
 
 class FuyaoError(Exception):
     """扶摇接口错误(配置缺失 / 网络失败 / 信封 code != 0)。"""
 
-    def __init__(self, message: str = "", *, code: int | str | None = None, api_message: str = "") -> None:
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        code: int | str | None = None,
+        api_message: str = "",
+        status_code: int | None = None,
+        retry_after_s: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.api_message = api_message
+        self.status_code = status_code
+        self.retry_after_s = retry_after_s
+
+
+class FuyaoRateLimitError(FuyaoError):
+    """扶摇 HTTP 429,携带服务端建议的重试时间。"""
 
 
 class FuyaoUnknownSymbolError(FuyaoError):
@@ -63,12 +117,32 @@ class FuyaoClient:
     # ---- 内部 ----
     def _get(self, path: str, params: dict) -> dict:
         """GET + 信封解包。code != 0 时抛 FuyaoError(含 code 与 message)。"""
-        try:
-            resp = self._http.get(path, params=params)
-        except httpx.HTTPError as e:
-            raise FuyaoError(f"网络请求失败: {e}") from e
+        for attempt in range(_RATE_LIMIT_RETRIES + 1):
+            _REQUEST_LIMITER.wait()
+            try:
+                resp = self._http.get(path, params=params)
+            except httpx.HTTPError as e:
+                raise FuyaoError(f"网络请求失败: {e}") from e
+            if resp.status_code == 429:
+                retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
+                if attempt >= _RATE_LIMIT_RETRIES:
+                    wait_s = retry_after if retry_after is not None else _RATE_LIMIT_MAX_SLEEP_S
+                    raise FuyaoRateLimitError(
+                        f"HTTP 429: {path} (重试 {attempt} 次后仍被限流)",
+                        status_code=429,
+                        retry_after_s=wait_s,
+                    )
+                backoff = min(_RATE_LIMIT_MAX_SLEEP_S, _RATE_LIMIT_BACKOFF_S * (2 ** attempt))
+                wait_s = max(backoff, retry_after or 0.0) + random.uniform(0.0, 0.25)
+                logger.warning(
+                    "扶摇请求被限流(path=%s, attempt=%d/%d), %.2fs 后重试",
+                    path, attempt + 1, _RATE_LIMIT_RETRIES, wait_s,
+                )
+                time.sleep(wait_s)
+                continue
+            break
         if resp.status_code != 200:
-            raise FuyaoError(f"HTTP {resp.status_code}: {path}")
+            raise FuyaoError(f"HTTP {resp.status_code}: {path}", status_code=resp.status_code)
         try:
             payload = resp.json()
         except ValueError as e:
@@ -225,7 +299,7 @@ class FuyaoClient:
     # ---- 财务 ----
     # 端点均单标的(thscode 不接受逗号)。取数模式二选一: limit=最近N期 或 start/end 区间,
     # 这里只用 limit。period=quarterly 覆盖每个季度末(含年报期), 与项目"各报告期累积"口径一致。
-    _STATEMENT_ENDPOINTS = {
+    _STATEMENT_ENDPOINTS = {  # noqa: RUF012
         "income": "income-statements",
         "balance_sheet": "balance-sheets",
         "cash_flow": "cash-flow-statements",

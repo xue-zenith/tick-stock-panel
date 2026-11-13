@@ -8,9 +8,6 @@ from app.backtest.matrix import (
     make_signal_matrix,
     matrix_feature,
 )
-from app.backtest.matrix import (
-    valid_shift as shift,
-)
 
 META = {
     "id": "long_lower_shadow_reversal",

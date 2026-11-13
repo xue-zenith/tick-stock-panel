@@ -5,8 +5,8 @@
 只剩竞价栏。修复后: 回退返回本地已落盘的行 (图冻结在最后落盘时刻), 并以
 truncated 字段标记残缺 symbol, 供前端提示。
 """
-import json
 import datetime as _dt
+import json
 
 import polars as pl
 import pytest

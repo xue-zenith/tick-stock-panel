@@ -115,7 +115,7 @@ def test_explicit_history_date_uses_cache(data_dir, monkeypatch):
 
 def test_unpublished_today_falls_back_to_prev(data_dir, monkeypatch):
     # 08-28 拉取失败 (未发布/未就绪) → 回退 08-27, state=fallback_prev
-    provider = _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28"}))
+    _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28"}))
     out = dt.get_dragon_tiger(data_dir, date(2026, 8, 28))
     assert out["state"] == "fallback_prev"
     assert out["trade_date"] == "2026-08-27"
@@ -126,7 +126,7 @@ def test_unpublished_today_falls_back_to_prev(data_dir, monkeypatch):
 
 
 def test_total_failure_returns_no_data(data_dir, monkeypatch):
-    provider = _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28", "2026-08-27"}))
+    _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28", "2026-08-27"}))
     out = dt.get_dragon_tiger(data_dir, date(2026, 8, 28))
     assert out["state"] == "no_data"
     assert "2026-08-28" in out.get("message", "")
