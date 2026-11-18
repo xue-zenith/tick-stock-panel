@@ -465,7 +465,9 @@ def test_handle_rebuild_client_raises_after_close():
 # rebuild_client 并发回归
 #
 # rebuild 必须: ①计入在途引用, 不被 replace 提前关闭; ②异常时释放引用;
-# ③不永久停用 handle。改坏任一条, 都会退回「自愈把源打死」或引用泄漏。
+# ③不永久停用 handle; ④与 replace 并发时, 重建最终落在当前生效的源上
+# (而不是只修了被换下的旧源); ⑤全程不持有 handle 锁去做外部关闭。
+# 改坏任一条, 都会退回「自愈把源打死」「引用泄漏」或「自愈静默失效」。
 # ================================================================
 
 
@@ -497,7 +499,7 @@ def test_rebuild_client_delays_close_until_rebuild_returns():
 
     finish.set()
     worker.join(3)
-    assert rebuilt == [old]
+    assert rebuilt == [old, new], "旧源先修, 发现已被换下后对新源补做一次"
     assert closed == [old], "rebuild 结束后旧源才关闭"
     assert handle.get_realtime() == [1], "handle 仍可用, 且指向新源"
 
@@ -634,6 +636,72 @@ def test_rebuild_client_works_through_minute_stream_wrapper():
     assert rebuilt == [source], "经 __getattr__ 透传到内层"
     assert closed == []
     assert handle.get_realtime() == [1]
+
+
+def test_rebuild_client_does_not_hold_lock_while_rebuilding():
+    """rebuild 期间不能持锁: 否则一次慢速 HTTP 关闭会把整个源的取数全堵住。
+
+    判据不是「取数会不会慢」而是「取数会不会被卡住」: 若 rebuild 持锁, 主线程的
+    get_realtime() 会在锁上无限等待, 这里用短超时把它变成可失败的断言。
+    """
+    started, finish = threading.Event(), threading.Event()
+    fetch_done = threading.Event()
+    fetch_result = []
+
+    class Source:
+        def get_realtime(self):
+            return [1]
+
+        def rebuild_client(self):
+            started.set()
+            assert finish.wait(5)  # 卡住, 模拟慢速关闭 HTTP 池
+
+        def close(self):
+            pass
+
+    handle = ManagedProvider(Source())
+    worker = threading.Thread(target=handle.rebuild_client)
+    worker.start()
+    assert started.wait(3)
+
+    def fetch():
+        fetch_result.append(handle.get_realtime())
+        fetch_done.set()
+
+    fetcher = threading.Thread(target=fetch, daemon=True)
+    fetcher.start()
+    try:
+        assert fetch_done.wait(1.0), "rebuild 期间取数被 handle 锁挡住了"
+        assert fetch_result == [[1]]
+    finally:
+        finish.set()
+        worker.join(5)
+    assert not worker.is_alive()
+
+
+def test_rebuild_client_gives_up_after_two_rounds():
+    """连续被 replace 换下时最多追两轮, 不无限重试 (下一轮健康探测会再触发)。"""
+    rebuilt = []
+
+    class Source:
+        def get_realtime(self):
+            return [1]
+
+        def rebuild_client(self):
+            rebuilt.append(self)
+            # 每轮重建都触发一次替换, 让 entry 永远不是当前源
+            handle.replace(Source())
+
+        def close(self):
+            pass
+
+    first = Source()
+    handle = ManagedProvider(first)
+    handle.rebuild_client()
+
+    assert len(rebuilt) == 2, "最多追两轮, 不能无限重试"
+    assert rebuilt[0] is first, "第一轮修被换下的旧源"
+    assert handle.get_realtime() == [1], "handle 仍可用"
 
 
 

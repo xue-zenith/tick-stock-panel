@@ -86,23 +86,34 @@ class ManagedProvider:
         之后所有调用抛「数据源已停止」(行情自愈重建因此把源打死的线上事故)。
         内层有 rebuild_client() 就用它 (GenericHTTPProvider 先换后关);
         否则退回 close() (FuyaoProvider 置 _client=None, 下次懒重建)。
+
+        与 replace() 并发时, 重建可能落在刚被换下的旧源上, 而调用方真正要修的是
+        当前生效的源。所以重建完再确认 entry 仍是 current, 不是就对新生效的源补做
+        一次 (至多两轮): 不能持锁重建 —— 那会把 handle 锁带进外部 HTTP 关闭逻辑,
+        正是本模块刻意避免的。
         """
-        with self._lock:
-            entry = self._current
-            if entry[2]:
-                raise ProviderRequestError("数据源已停止，请重新选择数据源")
-            provider = entry[0]
-            entry[1] += 1
-        try:
-            rebuild = getattr(provider, "rebuild_client", None)
-            if callable(rebuild):
-                rebuild()
-                return
-            close = getattr(provider, "close", None)
-            if callable(close):
-                close()
-        finally:
-            self._release(entry)
+        for _ in range(2):
+            with self._lock:
+                entry = self._current
+                if entry[2]:
+                    raise ProviderRequestError("数据源已停止，请重新选择数据源")
+                provider = entry[0]
+                entry[1] += 1
+            try:
+                rebuild = getattr(provider, "rebuild_client", None)
+                if callable(rebuild):
+                    rebuild()
+                else:
+                    close = getattr(provider, "close", None)
+                    if callable(close):
+                        close()
+            finally:
+                self._release(entry)
+            with self._lock:
+                if self._current is entry:
+                    return
+            logger.info("rebuild: 目标源在重建期间被 replace() 换下, 对新源补做一次")
+        logger.warning("rebuild: 连续两轮都被 replace() 换下, 不再追 (下一轮探测会再触发)")
 
     def __getattr__(self, name):
         with self._lock:

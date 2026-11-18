@@ -53,6 +53,21 @@
   修复: `ManagedProvider` 新增 `rebuild_client()` 转发到内层 provider (持锁计入在途引用,
   避免被 `replace()` 提前关闭), `rebuild_realtime_client()` 只走该入口。
 
+- **自愈重建落在被换下的旧源上** (2026-11-18):
+  `rebuild_client()` 只在开锁进入时取一次 `self._current`。若此刻用户正好切换数据源
+  (或插件重载) 触发 `replace()`, 重建就作用在已被换下的旧 provider 上, 而真正生效的
+  新 provider 的僵死池一次都没被修 —— 自愈静默失效, 直到下一轮探测 (60s) 才可能再触发。
+
+  危害评估: 实际不致命。`replace()` 的两个调用点 (`loader.py:631` 的插件重载、
+  `loader.py:703` 的包安装/更新) 传进来的都是**刚构造出来的实例**, `GenericHTTPProvider`
+  在 `__init__` 里就建好了新 `httpx.Client`, `FuyaoProvider` 的 `_client` 是 `None`
+  (懒重建)。新源的空池不可能是僵死态, 所以不会造成行情中断。
+
+  但契约是错的: `rebuild_client()` 返回成功时, 当前生效的源未必被重建过。修复为重建后
+  再比对 `entry is self._current`, 不是就对新生效的源补做一次, 至多两轮 (连续被换下就
+  放弃, 交给下一轮探测); 两轮仍不行只记 warning。**刻意不持锁重建** —— 那会把 handle 锁
+  带进外部 HTTP 关闭逻辑, 正是本模块为「不阻塞在途调用」而避免的做法。
+
 - **睡眠唤醒被误判成池僵死** (2026-11-18):
   探针在系统唤醒 (DarkWake) 的瞬间先于行情轮询线程恢复, 此时 `quote_age` 还是睡眠
   或休盘期间留下的旧值, 探针据此判定「池僵死」并逐级升级: 连续 3 次即软重建, 10 次即
@@ -125,14 +140,24 @@
 
 `backend/tests/test_watchdog.py` (4 个) 无回归。
 
-`backend/tests/test_source_packages.py` 新增 6 个 `rebuild_client` 并发回归:
+`backend/tests/test_source_packages.py` 新增 8 个 `rebuild_client` 并发回归:
 
-- `test_rebuild_client_delays_close_until_rebuild_returns`: rebuild 在途时 replace 不关闭旧源
+- `test_rebuild_client_delays_close_until_rebuild_returns`: rebuild 在途时 replace 不关闭旧源,
+  且旧源修完后对新源补做 (断言 `rebuilt == [old, new]`)
 - `test_rebuild_client_releases_refcount_when_inner_close_raises`: 内层 close 抛错仍释放引用
 - `test_rebuild_client_releases_refcount_when_inner_rebuild_raises`: 内层 rebuild 抛错仍释放引用
 - `test_rebuild_client_does_not_kill_handle_under_concurrency`: 并发 rebuild + 取数无死锁
 - `test_rebuild_client_rebuilds_inner_not_wrapper`: rebuild 绝不停用 handle (事故形态)
 - `test_rebuild_client_works_through_minute_stream_wrapper`: 经 `LegacyMinuteAdapter` 仍能透传
+- `test_rebuild_client_does_not_hold_lock_while_rebuilding`: rebuild 卡在内层时,
+  另起线程取数必须在 1s 内完成 —— 持锁重建会让它饿死
+- `test_rebuild_client_gives_up_after_two_rounds`: 每轮重建都触发一次 replace,
+  断言重建恰好执行 2 次后停止, 不无限重试
 
 这组测试做过变异验证: 把实现回退成「rebuild 走 handle.close()」的事故形态, 9 个测试同时失败;
-去掉 `finally` 的引用释放或 `entry[1] += 1`, 各有 3 个测试失败 —— 确认不是空跑的摆设。
+去掉 `finally` 的引用释放或 `entry[1] += 1`, 各有 3 个测试失败; 把轮数改成 1 或删掉
+`entry is self._current` 比对, 各有 2 个失败; 把重建挪进 `with self._lock` 内,
+`does_not_hold_lock_while_rebuilding` 失败 —— 确认不是空跑的摆设。
+
+（注: 该测试最初写成「rebuild 卡住时主线程直接取数」, 持锁变异下只是变慢 6 秒而不失败,
+属于空断言; 已改为独立线程 + `Event.wait(1.0)` 判据。）
