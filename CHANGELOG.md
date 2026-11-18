@@ -140,7 +140,7 @@
 
 `backend/tests/test_watchdog.py` (4 个) 无回归。
 
-`backend/tests/test_source_packages.py` 新增 8 个 `rebuild_client` 并发回归:
+`backend/tests/test_source_packages.py` 新增 9 个 `rebuild_client` 并发回归:
 
 - `test_rebuild_client_delays_close_until_rebuild_returns`: rebuild 在途时 replace 不关闭旧源,
   且旧源修完后对新源补做 (断言 `rebuilt == [old, new]`)
@@ -153,11 +153,15 @@
   另起线程取数必须在 1s 内完成 —— 持锁重建会让它饿死
 - `test_rebuild_client_gives_up_after_two_rounds`: 每轮重建都触发一次 replace,
   断言重建恰好执行 2 次后停止, 不无限重试
+- `test_rebuild_client_raises_if_handle_closed_between_rounds`: 补做那轮开始前 handle
+  已被 close(), 必须抛「数据源已停止」而不是静默返回成功
 
 这组测试做过变异验证: 把实现回退成「rebuild 走 handle.close()」的事故形态, 9 个测试同时失败;
 去掉 `finally` 的引用释放或 `entry[1] += 1`, 各有 3 个测试失败; 把轮数改成 1 或删掉
 `entry is self._current` 比对, 各有 2 个失败; 把重建挪进 `with self._lock` 内,
-`does_not_hold_lock_while_rebuilding` 失败 —— 确认不是空跑的摆设。
+`does_not_hold_lock_while_rebuilding` 失败; 把补做轮里的「已停止」抛错改成 `return`,
+`raises_if_handle_closed_between_rounds` 与 `raises_after_close` 同时失败 ——
+确认不是空跑的摆设。
 
 （注: 该测试最初写成「rebuild 卡住时主线程直接取数」, 持锁变异下只是变慢 6 秒而不失败,
 属于空断言; 已改为独立线程 + `Event.wait(1.0)` 判据。）

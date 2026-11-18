@@ -705,6 +705,34 @@ def test_rebuild_client_gives_up_after_two_rounds():
 
 
 
+def test_rebuild_client_raises_if_handle_closed_between_rounds():
+    """补做那一轮开始前 handle 被 close(): 抛「已停止」, 不假装重建成功。
+
+    这是 identity 重试引入的新分支。handle 已停用时, 无论旧源修过没修过,
+    对外都不该报成功 —— 调用方拿不到可用的源。
+    """
+    rebuilt = []
+
+    class Source:
+        def get_realtime(self):
+            return [1]
+
+        def rebuild_client(self):
+            rebuilt.append(self)
+            handle.replace(Source())  # 换下当前源
+            handle.close()             # 再把 handle 停掉
+
+        def close(self):
+            pass
+
+    first = Source()
+    handle = ManagedProvider(first)
+    with pytest.raises(ProviderRequestError, match="数据源已停止"):
+        handle.rebuild_client()
+
+    assert rebuilt == [first], "只跑了第一轮, 第二轮在拿 entry 时就被拦下"
+
+
 def test_quote_service_rebuild_keeps_wrapped_source_alive(isolated, monkeypatch):
     """行情自愈重建走 handle 后, 源仍能继续取数 (线上「数据源已停止」事故回归)。"""
     from app.services.quote_service import QuoteService
