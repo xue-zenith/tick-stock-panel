@@ -124,3 +124,15 @@
 - 8 个睡眠唤醒检测测试 (`SleepTracker` 四态 + 容差随阈值派生 + watcher 作废/恢复判定/不清零僵死周期)
 
 `backend/tests/test_watchdog.py` (4 个) 无回归。
+
+`backend/tests/test_source_packages.py` 新增 6 个 `rebuild_client` 并发回归:
+
+- `test_rebuild_client_delays_close_until_rebuild_returns`: rebuild 在途时 replace 不关闭旧源
+- `test_rebuild_client_releases_refcount_when_inner_close_raises`: 内层 close 抛错仍释放引用
+- `test_rebuild_client_releases_refcount_when_inner_rebuild_raises`: 内层 rebuild 抛错仍释放引用
+- `test_rebuild_client_does_not_kill_handle_under_concurrency`: 并发 rebuild + 取数无死锁
+- `test_rebuild_client_rebuilds_inner_not_wrapper`: rebuild 绝不停用 handle (事故形态)
+- `test_rebuild_client_works_through_minute_stream_wrapper`: 经 `LegacyMinuteAdapter` 仍能透传
+
+这组测试做过变异验证: 把实现回退成「rebuild 走 handle.close()」的事故形态, 9 个测试同时失败;
+去掉 `finally` 的引用释放或 `entry[1] += 1`, 各有 3 个测试失败 —— 确认不是空跑的摆设。

@@ -17,6 +17,7 @@ from app.custom.source_packages.routes import router
 from app.data_providers.base import ProviderRequestError
 from app.data_providers.custom import loader, packages
 from app.data_providers.custom.managed import ManagedProvider
+from app.data_providers.minute_stream import LegacyMinuteAdapter
 from app.services import preferences
 
 CODE = '''from types import SimpleNamespace
@@ -458,6 +459,182 @@ def test_handle_rebuild_client_raises_after_close():
     handle.close()
     with pytest.raises(ProviderRequestError, match="数据源已停止"):
         handle.rebuild_client()
+
+
+# ================================================================
+# rebuild_client 并发回归
+#
+# rebuild 必须: ①计入在途引用, 不被 replace 提前关闭; ②异常时释放引用;
+# ③不永久停用 handle。改坏任一条, 都会退回「自愈把源打死」或引用泄漏。
+# ================================================================
+
+
+def test_rebuild_client_delays_close_until_rebuild_returns():
+    """rebuild 进行中 replace: 旧源不能在 rebuild 返回前被关闭 (否则重建的是死连接)。"""
+    started, finish = threading.Event(), threading.Event()
+    closed, rebuilt = [], []
+
+    class Source:
+        def get_realtime(self):
+            return [1]
+
+        def rebuild_client(self):
+            started.set()
+            assert finish.wait(3)  # 卡住, 等主线程 replace
+            rebuilt.append(self)
+
+        def close(self):
+            closed.append(self)
+
+    old, new = Source(), Source()
+    handle = ManagedProvider(old)
+    worker = threading.Thread(target=handle.rebuild_client)
+    worker.start()
+    assert started.wait(3)
+
+    handle.replace(new)
+    assert not closed, "rebuild 在途时旧源不应被关闭"
+
+    finish.set()
+    worker.join(3)
+    assert rebuilt == [old]
+    assert closed == [old], "rebuild 结束后旧源才关闭"
+    assert handle.get_realtime() == [1], "handle 仍可用, 且指向新源"
+
+
+def test_rebuild_client_releases_refcount_when_inner_close_raises():
+    """内层 close() 抛异常时仍要释放在途引用, 否则该 entry 永远关不掉 (泄漏)。"""
+    class Source:
+        def get_realtime(self):
+            return [1]
+
+        def close(self):
+            raise RuntimeError("close 炸了")
+
+    handle = ManagedProvider(Source())
+    with pytest.raises(RuntimeError, match="close 炸了"):
+        handle.rebuild_client()
+
+    assert handle._current[1] == 0, "在途引用计数必须归零"
+    assert handle._current[2] is False, "handle 不应被停用"
+    assert handle.get_realtime() == [1], "handle 仍可正常取数"
+
+
+def test_rebuild_client_releases_refcount_when_inner_rebuild_raises():
+    """内层 rebuild_client() 抛异常时同样要释放引用。"""
+    class Source:
+        def get_realtime(self):
+            return [1]
+
+        def rebuild_client(self):
+            raise RuntimeError("rebuild 炸了")
+
+        def close(self):
+            raise AssertionError("有 rebuild_client 就不该退回 close()")
+
+    handle = ManagedProvider(Source())
+    with pytest.raises(RuntimeError, match="rebuild 炸了"):
+        handle.rebuild_client()
+
+    assert handle._current[1] == 0
+    assert handle.get_realtime() == [1]
+
+
+def test_rebuild_client_does_not_kill_handle_under_concurrency():
+    """并发 rebuild + 取数: 无死锁, 且结束后 handle 仍能取数 (线上事故回归)。"""
+    class Source:
+        def get_realtime(self):
+            return [1]
+
+        def rebuild_client(self):
+            pass
+
+        def close(self):
+            raise AssertionError("rebuild 不应永久停用源")
+
+    handle = ManagedProvider(Source())
+    errors: list[BaseException] = []
+
+    def rebuild_many():
+        try:
+            for _ in range(50):
+                handle.rebuild_client()
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    def fetch_many():
+        try:
+            for _ in range(50):
+                assert handle.get_realtime() == [1]
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=rebuild_many), threading.Thread(target=fetch_many)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+        assert not t.is_alive(), "并发下出现死锁"
+
+    assert errors == []
+    assert handle.get_realtime() == [1]
+
+
+def test_rebuild_client_rebuilds_inner_not_wrapper():
+    """rebuild 必须作用在内层 provider 上, 而不是触发 handle 自己的 close()。
+
+    这是线上事故的直接形态: 用 getattr(provider, "close") 取重建入口时,
+    handle 的类方法会遮蔽 __getattr__, 于是重建 = 永久停用。
+    """
+    inner_closed, inner_rebuilt = [], []
+
+    class Source:
+        def get_realtime(self):
+            return [1]
+
+        def rebuild_client(self):
+            inner_rebuilt.append(self)
+
+        def close(self):
+            inner_closed.append(self)
+
+    source = Source()
+    handle = ManagedProvider(source)
+    handle.rebuild_client()
+
+    assert inner_rebuilt == [source]
+    assert inner_closed == [], "不应走到 close()"
+    assert handle._current[2] is False, "handle 绝不能被标记为停止"
+
+
+def test_rebuild_client_works_through_minute_stream_wrapper():
+    """被 with_minute_stream 包一层后, rebuild_client 仍能透传到内层。"""
+    rebuilt, closed = [], []
+
+    class LegacySource:
+        """只有 get_minute → 会被 LegacyMinuteAdapter 包装。"""
+        def get_minute(self, *a, **kw):
+            return None
+
+        def get_realtime(self):
+            return [1]
+
+        def rebuild_client(self):
+            rebuilt.append(self)
+
+        def close(self):
+            closed.append(self)
+
+    source = LegacySource()
+    handle = ManagedProvider(source)
+    assert isinstance(handle._current[0], LegacyMinuteAdapter), "前提: 已被包装"
+
+    handle.rebuild_client()
+
+    assert rebuilt == [source], "经 __getattr__ 透传到内层"
+    assert closed == []
+    assert handle.get_realtime() == [1]
+
 
 
 def test_quote_service_rebuild_keeps_wrapped_source_alive(isolated, monkeypatch):
