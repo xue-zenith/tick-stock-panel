@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta
@@ -97,29 +98,79 @@ def _normalize_pct_units(
 
 
 class GenericHTTPProvider:
-    """HTTP-backed custom source. It only handles fetching and schema mapping."""
+    """HTTP-backed custom source. It only handles fetching and schema mapping.
+
+    httpx.Client 本身可以多线程共用, 但 close() 是销毁性的: 实测在请求在途时关闭
+    同一个 client, 在途请求会以 ReadTimeout 失败 (不是 ConnectionError, 很难归因)。
+    所以客户端用引用计数管理: 每次请求先租约、后释放, rebuild_client()/close()
+    只换下当前 entry 并标记, 等最后一个租约归还时才真正关闭旧 client。
+    """
 
     def __init__(self, config: CustomSourceConfig) -> None:
         self.config = config
         self.name = config.name
-        self._client = httpx.Client(timeout=30.0)
+        self._lock = threading.Lock()
+        # entry = [client, 在用租约数, 是否已换下] —— 与 ManagedProvider 同构
+        self._current: list = [self._new_client(), 0, False]
         self._minute_pacer = RequestPacer()
 
+    @staticmethod
+    def _new_client() -> httpx.Client:
+        return httpx.Client(timeout=30.0)
+
+    def _lease_client(self):
+        with self._lock:
+            entry = self._current
+            if entry[2]:
+                raise ProviderRequestError(f"数据源 {self.name} 已关闭")
+            entry[1] += 1
+            return entry
+
+    def _release_client(self, entry) -> None:
+        with self._lock:
+            entry[1] -= 1
+            close = entry[2] and entry[1] == 0
+        if close:
+            self._close_client(entry[0])
+
+    @staticmethod
+    def _close_client(client) -> None:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001 — 清理失败不能影响已换上的新客户端
+            logger.warning("custom provider client close failed", exc_info=False)
+
     def close(self) -> None:
-        self._client.close()
+        with self._lock:
+            entry = self._current
+            if entry[2]:
+                return
+            entry[2] = True
+            close = entry[1] == 0
+        if close:
+            self._close_client(entry[0])
 
     def rebuild_client(self) -> None:
         """关闭旧 httpx 客户端并新建一个, 用于健康检查自愈。
 
         与 __init__ 的构造逻辑保持一致 (统一 timeout, 无自定义 headers/auth);
         调用方健康检查器检测到连接池僵死时调用, 下一轮 get_realtime() 拿到全新池。
+
+        旧客户端不在换下的瞬间关闭, 而是等它的在途请求全部归还 —— 否则自愈动作
+        本身会把正在跑的请求打成 ReadTimeout, 看起来像又一次网络故障。
+
+        已 close() 的 provider 不做重建 (与 ManagedProvider 同语义): 否则一次
+        close 之后的自愈会把它悄悄复活, 生命周期状态自相矛盾。
         """
-        old = self._client
-        self._client = httpx.Client(timeout=30.0)
-        try:  # noqa: SIM105
-            old.close()
-        except Exception:  # noqa: BLE001
-            pass
+        with self._lock:
+            if self._current[2]:
+                raise ProviderRequestError(f"数据源 {self.name} 已关闭")
+            old = self._current
+            self._current = [self._new_client(), 0, False]
+            old[2] = True
+            close = old[1] == 0
+        if close:
+            self._close_client(old[0])
 
     def validate(self) -> list[str]:
         errors: list[str] = []
@@ -566,9 +617,13 @@ class GenericHTTPProvider:
         else:
             request_kwargs["params"] = auth_params
             request_kwargs["json"] = body
-        resp = self._client.request(method, cfg.url, **request_kwargs)
-        resp.raise_for_status()
-        return extract_rows(resp.json(), cfg.response_path)
+        entry = self._lease_client()
+        try:
+            resp = entry[0].request(method, cfg.url, **request_kwargs)
+            resp.raise_for_status()
+            return extract_rows(resp.json(), cfg.response_path)
+        finally:
+            self._release_client(entry)
 
     def _auth_parts(self) -> tuple[dict[str, str], dict[str, str]]:
         auth = self.config.auth

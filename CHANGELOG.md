@@ -68,6 +68,25 @@
   放弃, 交给下一轮探测); 两轮仍不行只记 warning。**刻意不持锁重建** —— 那会把 handle 锁
   带进外部 HTTP 关闭逻辑, 正是本模块为「不阻塞在途调用」而避免的做法。
 
+- **`GenericHTTPProvider` 的 httpx 客户端改用引用计数** (2026-11-18):
+  `rebuild_client()` 原先是「换新 client → 立刻 close 旧 client」。`httpx.Client`
+  本身多线程共用没问题 (实测 6 线程 × 5 次并发全部成功), 但 `close()` 是销毁性的:
+  在请求在途时关掉同一个 client, 在途请求会以 **`ReadTimeout`** 失败 —— 不是
+  `ConnectionError`, 日志里看起来就像又一次网络波动, 极难归因到自愈动作本身。
+  实测三种行为: 在途 close → `ReadTimeout`; 已关闭 client 再请求 →
+  `RuntimeError: Cannot send a request, as the client has been closed.`;
+  重复 close → 幂等不报错。
+
+  `ManagedProvider` 的在途引用计数只保护 entry 不被 `replace()` 提前关闭, 完全没有
+  保护 provider 内部的旧 client —— 自愈重建因此会成为一次自制的故障。修复为与
+  `ManagedProvider` 同构的 entry `[client, 租约数, 已换下]`:
+  `_request_rows()` 先 `_lease_client()` 后 `finally: _release_client()`;
+  `rebuild_client()` / `close()` 只标记换下, 等最后一个租约归还才真正关闭。
+
+  顺带统一语义: 已 `close()` 的 provider 调 `rebuild_client()` 现在抛
+  `ProviderRequestError("数据源 X 已关闭")`, 与 `ManagedProvider` 一致;
+  此前会把死 provider 悄悄复活, 生命周期状态自相矛盾。
+
 - **睡眠唤醒被误判成池僵死** (2026-11-18):
   探针在系统唤醒 (DarkWake) 的瞬间先于行情轮询线程恢复, 此时 `quote_age` 还是睡眠
   或休盘期间留下的旧值, 探针据此判定「池僵死」并逐级升级: 连续 3 次即软重建, 10 次即
@@ -165,3 +184,31 @@
 
 （注: 该测试最初写成「rebuild 卡住时主线程直接取数」, 持锁变异下只是变慢 6 秒而不失败,
 属于空断言; 已改为独立线程 + `Event.wait(1.0)` 判据。）
+
+新增 `backend/tests/test_custom_provider_client.py` (9 个测试, 覆盖
+`GenericHTTPProvider` 的 client 生命周期):
+
+- `test_rebuild_swaps_to_a_fresh_client`: 换新并关闭旧的, provider 本身仍可用
+- `test_rebuild_defers_close_until_request_returns`: rebuild 时在途请求未归还不关旧 client
+- `test_close_waits_for_in_flight_request`: close() 同样等租约归还
+- `test_close_is_idempotent`: 重复 close 不报错 (httpx 本身幂等, 这里锁住本层行为)
+- `test_request_after_close_raises_instead_of_using_dead_client`: 不再拿死 client 去请求
+- `test_rebuild_after_close_raises`: close 后 rebuild 抛错, 不复活
+- `test_failed_request_still_releases_its_lease`: 请求抛异常仍归还租约 (防泄漏)
+- `test_concurrent_rebuild_and_requests_never_use_closed_client`: 80 轮并发重建+取数, 无死锁无错
+- `test_in_flight_request_survives_rebuild_with_real_httpx`: **真实 httpx + 本地慢服务**,
+  请求在途时 rebuild, 请求必须正常返回 (这条直接复现修复前的 `ReadTimeout`)
+
+变异验证 (每条都确认了失败):
+
+| 注入的缺陷 | 失败测试 |
+|---|---|
+| 换下即立刻 close 旧 client (修复前形态) | 2 (`defers_close` + 真实 httpx 那条) |
+| `close()` 忽略在途租约 | 1 (`close_waits_for_in_flight_request`) |
+| 请求抛异常时不归还租约 | 1 (`failed_request_still_releases_its_lease`) |
+| 去掉 rebuild 的「已关闭」检查 | 1 (`rebuild_after_close_raises`) |
+
+其中「请求抛异常不归还租约」最初没有测试覆盖 —— 变异 C 全绿通过才发现的, 补测试后才拦住。
+
+`backend/tests/test_minute_provider_stream.py:223,227` 的 `_client.is_closed` 断言随内部
+结构改为 `_current[0].is_closed`。

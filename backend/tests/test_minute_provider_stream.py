@@ -220,11 +220,11 @@ def test_yaml_reload_defers_close_until_minute_stream_finishes(monkeypatch, tmp_
         stream = loader.get_provider("yaml").iter_minute(["a", "b"], None, None)
         assert next(stream)["symbol"].to_list() == ["a"]
         loader.load_all(tmp_path)
-        assert not old._client.is_closed
+        assert not old._current[0].is_closed
         assert loader.list_sources()[0]["name"] == "yaml"
         assert loader.get_config_dict("yaml")["datasets"]["minute"]["batch"] == 1
         assert [part["symbol"].to_list() for part in stream] == [["b"]]
-        assert old._client.is_closed and not new._client.is_closed
+        assert old._current[0].is_closed and not new._current[0].is_closed
     finally:
         old.close()
         new.close()
