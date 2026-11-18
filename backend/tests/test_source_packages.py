@@ -415,6 +415,77 @@ def test_handle_delays_close_during_concurrent_request():
     assert closed == [old]
 
 
+def test_handle_rebuild_client_keeps_handle_usable():
+    """rebuild_client() 转发到内层, 不永久停用 handle (行情自愈重建路径)。"""
+    rebuilt = []
+    class Source:
+        def get_realtime(self):
+            return [1]
+        def rebuild_client(self):
+            rebuilt.append(self)
+        def close(self):
+            raise AssertionError("rebuild 不应调用内层 close()")
+    source = Source()
+    handle = ManagedProvider(source)
+    handle.rebuild_client()
+    assert rebuilt == [source]
+    assert handle.get_realtime() == [1]
+
+
+def test_handle_rebuild_client_falls_back_to_close():
+    """内层没有 rebuild_client() 时退回 close() (FuyaoProvider 懒重建路径)。"""
+    closed = []
+    class Source:
+        def get_realtime(self):
+            return [1]
+        def close(self):
+            closed.append(self)
+    source = Source()
+    handle = ManagedProvider(source)
+    handle.rebuild_client()
+    assert closed == [source]
+    assert handle.get_realtime() == [1]  # handle 仍可用
+
+
+def test_handle_rebuild_client_raises_after_close():
+    """handle 已被 close() 停用后, rebuild_client() 抛错而不是静默成功。"""
+    class Source:
+        def get_realtime(self):
+            return [1]
+        def close(self):
+            pass
+    handle = ManagedProvider(Source())
+    handle.close()
+    with pytest.raises(ProviderRequestError, match="数据源已停止"):
+        handle.rebuild_client()
+
+
+def test_quote_service_rebuild_keeps_wrapped_source_alive(isolated, monkeypatch):
+    """行情自愈重建走 handle 后, 源仍能继续取数 (线上「数据源已停止」事故回归)。"""
+    from app.services.quote_service import QuoteService
+
+    rebuilt = []
+
+    class Source:
+        def get_realtime(self):
+            return [1]
+
+        def rebuild_client(self):
+            rebuilt.append(self)
+
+        def close(self):
+            raise AssertionError("自愈重建不应永久停用源")
+
+    source = Source()
+    loader._PROVIDERS["fuyao"] = ManagedProvider(source)
+    monkeypatch.setattr(preferences, "get_realtime_data_provider", lambda: "fuyao")
+
+    QuoteService().rebuild_realtime_client()
+
+    assert rebuilt == [source]
+    assert loader._PROVIDERS["fuyao"].get_realtime() == [1]
+
+
 def test_management_auth_and_upload_api(isolated, monkeypatch):
     from app.services import auth
     monkeypatch.setattr(auth, "is_configured", lambda: False)

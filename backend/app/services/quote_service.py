@@ -429,10 +429,11 @@ class QuoteService:
     def rebuild_realtime_client(self) -> None:
         """重建自定义源 provider 的 httpx 客户端, 用于健康检查自愈。
 
-        两种 provider 走不同路径:
-        - FuyaoProvider: 调 close() 置 _client=None, 下次 _get_client() 懒重建
-          FuyaoClient (不能用裸 httpx.Client 替换, 否则 snapshot_all 等方法丢失)。
-        - GenericHTTPProvider: 调 rebuild_client() 替换 httpx.Client。
+        只走 provider.rebuild_client(): get_provider() 返回的是 ManagedProvider
+        handle, 它的 close() 会永久停用该源 (之后每轮抛「数据源已停止」),
+        所以不能像内层 provider 那样靠 close() 触发懒重建。
+        ManagedProvider.rebuild_client() 转发到内层: GenericHTTPProvider 换新
+        httpx.Client, FuyaoProvider 置 _client=None 懒重建 FuyaoClient。
         """
         from app.data_providers import custom as custom_sources
         from app.services import preferences
@@ -442,21 +443,15 @@ class QuoteService:
             return
         provider = custom_sources.get_provider(name)
 
-        # 优先用 provider 自己的 close() (FuyaoProvider.close 会置 None + 懒重建)
-        # 这能正确处理 FuyaoClient 重建, 避免 snapshot_all 等方法丢失。
-        close_method = getattr(provider, "close", None)
-        if callable(close_method):
-            try:
-                close_method()
-            except Exception as e:  # noqa: BLE001
-                logger.warning("rebuild: close() 失败: %r", e)
-        # 如果 provider 暴露了 rebuild_client (GenericHTTPProvider), 用它替换 httpx.Client
         rebuild_method = getattr(provider, "rebuild_client", None)
-        if callable(rebuild_method):
-            try:
-                rebuild_method()
-            except Exception as e:  # noqa: BLE001
-                logger.warning("rebuild: rebuild_client() 失败: %r", e)
+        if not callable(rebuild_method):
+            logger.warning("rebuild: provider=%s 未提供 rebuild_client(), 跳过软重建", name)
+            return
+        try:
+            rebuild_method()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("rebuild: rebuild_client() 失败: %r", e)
+            return
         logger.warning("行情客户端已软重建 (provider=%s)", name)
 
     # ================================================================

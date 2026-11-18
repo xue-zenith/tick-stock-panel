@@ -79,6 +79,31 @@ class ManagedProvider:
         if close:
             self._close(old[0])
 
+    def rebuild_client(self):
+        """重建当前内层 provider 的 HTTP 客户端, handle 本身保持可用。
+
+        必须走这里而不是 handle.close(): close() 会永久停用本 handle,
+        之后所有调用抛「数据源已停止」(行情自愈重建因此把源打死的线上事故)。
+        内层有 rebuild_client() 就用它 (GenericHTTPProvider 先换后关);
+        否则退回 close() (FuyaoProvider 置 _client=None, 下次懒重建)。
+        """
+        with self._lock:
+            entry = self._current
+            if entry[2]:
+                raise ProviderRequestError("数据源已停止，请重新选择数据源")
+            provider = entry[0]
+            entry[1] += 1
+        try:
+            rebuild = getattr(provider, "rebuild_client", None)
+            if callable(rebuild):
+                rebuild()
+                return
+            close = getattr(provider, "close", None)
+            if callable(close):
+                close()
+        finally:
+            self._release(entry)
+
     def __getattr__(self, name):
         with self._lock:
             value = getattr(self._current[0], name)
