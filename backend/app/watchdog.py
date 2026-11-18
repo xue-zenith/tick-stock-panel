@@ -18,6 +18,7 @@ import contextlib
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable
 
 import httpx
@@ -146,6 +147,43 @@ class SourceUnavailable(Exception):  # noqa: N818
     """独立探针探不到源 —— 源/网络问题, 不重建 (重建无用)。"""
 
 
+class SleepTracker:
+    """检测系统睡眠/唤醒: 墙钟与单调钟的偏移只在睡眠期间增长。
+
+    time.monotonic() 在 macOS 是 CLOCK_UPTIME_RAW、在 Linux 是 CLOCK_MONOTONIC,
+    两种语义都不计入 suspend; time.time() (CLOCK_REALTIME) 计入。
+    所以 (墙钟 - 单调钟) 这个偏移在正常运行期间恒定, 只在系统睡过之后跳变,
+    偏移增量就是睡眠时长 —— 不需要读系统日志、不需要任何权限。
+
+    2026-11-18 事故背景: 探针在 DarkWake 瞬间先于轮询线程恢复, 读到的是睡眠前
+    留下的旧 quote_age (实测 7 次大值触发 7/7 落在 DarkWake 时刻), 把「刚睡醒」
+    误判成池僵死。有了这个探测器, 唤醒后的第一次探测可以直接作废。
+    """
+
+    def __init__(
+        self,
+        tolerance_s: float = 5.0,
+        *,
+        wall_clock: Callable[[], float] | None = None,
+        mono_clock: Callable[[], float] | None = None,
+    ) -> None:
+        # tolerance 的作用是吸收调度抖动与时钟微调 (实测偏移漂移 1 微秒/3 秒),
+        # 但它有硬上界: 必须显著小于陈旧阈值, 否则「刚好短于 tolerance 的睡眠」
+        # 会漏检, 而那些睡眠同样足以把 quote_age 顶过阈值 → 误报照旧。
+        # 调用方按阈值派生传入 (见 QuoteHealthWatcher), 默认 5s 只作兜底。
+        self._tolerance_s = tolerance_s
+        self._wall = wall_clock or time.time
+        self._mono = mono_clock or time.monotonic
+        self._baseline = self._wall() - self._mono()
+
+    def slept_since_last_check(self) -> float:
+        """距上次检查的睡眠秒数 (未睡返回 0.0), 并推进基线。"""
+        current = self._wall() - self._mono()
+        delta = current - self._baseline
+        self._baseline = current
+        return delta if delta > self._tolerance_s else 0.0
+
+
 def quote_stale_threshold_ms(interval_s: float) -> float:
     """quote_age 陈旧阈值: max(轮询间隔 × stale_intervals, 绝对下限)。
 
@@ -260,6 +298,11 @@ class QuoteHealthWatcher:
         self._source_unavailable_count = 0  # 探针连续失败 (可能探针自己池僵死)
         self._last_probe_ok = True
         self._last_probe_msg = "init"
+        self._sleep_tracker = SleepTracker(
+            tolerance_s=settings.quote_health_min_stale_s / 2
+        )
+        self._sleep_skips = 0  # 因睡眠唤醒作废的探测轮数
+        self._last_sleep_s = 0.0
         self._task: asyncio.Task | None = None
 
     async def _loop(self) -> None:
@@ -267,12 +310,34 @@ class QuoteHealthWatcher:
             await self._run_once()
             await asyncio.sleep(self._interval_s)
 
+    def _discard_after_sleep(self) -> bool:
+        """睡眠唤醒后的第一轮探测作废 (返回 True 表示应跳过本轮)。
+
+        睡眠期间进程被挂起, quote_age 停在睡眠前的值; 唤醒瞬间探针线程可能
+        先于轮询线程恢复, 读到的是陈旧但已无意义的 age。此时任何判断都不可信:
+        既不能算僵死 (会误重建), 也不能算恢复 (会把僵死周期误清空)。
+        直接跳过一轮, 等下一轮拿到唤醒后真实刷新的 age 再判。
+        """
+        slept = self._sleep_tracker.slept_since_last_check()
+        if slept <= 0:
+            return False
+        self._sleep_skips += 1
+        self._last_sleep_s = slept
+        logger.info(
+            "quote-health: 系统睡眠 %.0fs 后唤醒, 本轮探测作废 "
+            "(quote_age 停在睡前值, 下一轮再判)",
+            slept,
+        )
+        return True
+
     async def _run_once(self, *, is_post_rebuild_verify: bool = False) -> None:
         """单轮探测; 抽出来便于重建后立即再跑一轮验证。
 
         is_post_rebuild_verify=True 时表示这是重建后的验证探测, 不再触发重建
         (避免无限递归), 只验证恢复与否。
         """
+        if self._discard_after_sleep():
+            return
         try:
             await asyncio.wait_for(
                 asyncio.to_thread(self._probe), timeout=self._probe_timeout_s
@@ -374,6 +439,8 @@ class QuoteHealthWatcher:
             "source_unavailable_count": self._source_unavailable_count,
             "last_probe_ok": self._last_probe_ok,
             "last_probe_msg": self._last_probe_msg,
+            "sleep_skips": self._sleep_skips,
+            "last_sleep_s": round(self._last_sleep_s, 1),
             "rebuild_threshold": self._rebuild_threshold,
             "exit_threshold": self._exit_threshold,
             "interval_s": self._interval_s,

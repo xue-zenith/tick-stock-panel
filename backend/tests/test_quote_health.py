@@ -8,6 +8,7 @@ import pytest
 from app.watchdog import (
     QuoteHealthWatcher,
     QuotePoolStale,
+    SleepTracker,
     SourceUnavailable,
     quote_probe,
     quote_stale_threshold_ms,
@@ -329,13 +330,14 @@ def test_probe_skips_when_paused(fuyao_provider) -> None:
 
 def test_stale_threshold_floor_dominates_fast_polling() -> None:
     """快轮询 (1-30s) 全部落在绝对下限上, 不随 interval 缩小。"""
-    floor_ms = 90_000
-    for interval in (1.0, 3.0, 6.0, 10.0, 30.0):
+    floor_ms = 60_000
+    for interval in (1.0, 3.0, 6.0, 10.0, 20.0):
         assert quote_stale_threshold_ms(interval) == floor_ms
 
 
 def test_stale_threshold_relative_wins_on_slow_polling() -> None:
-    """慢轮询 (60s × 3 = 180s) 超过下限, 用相对值, 保持原倍数语义。"""
+    """慢轮询 (30s × 3 = 90s / 60s × 3 = 180s) 超过下限, 用相对值。"""
+    assert quote_stale_threshold_ms(30.0) == 90_000
     assert quote_stale_threshold_ms(60.0) == 180_000
 
 
@@ -345,3 +347,206 @@ def test_stale_threshold_tracks_stale_intervals(monkeypatch) -> None:
 
     monkeypatch.setattr(settings, "quote_health_stale_intervals", 5)
     assert quote_stale_threshold_ms(60.0) == 300_000
+
+
+# ================================================================
+# 场景 (i) 睡眠唤醒检测: 睡眠期间的旧 quote_age 不作数
+#
+# 2026-11-18 实况: 11:35:51 最后刷新 → 午休不轮询 → 12:35:29 起反复睡眠
+# → 13:09:02 DarkWake 瞬间探针先跑, quote_age=3628s (睡眠前旧值) 被判池僵死。
+# 实测 7 次大值触发 7/7 落在 DarkWake 时刻。
+# ================================================================
+
+
+class _FakeClock:
+    """可控的 (墙钟, 单调钟) 对; 睡眠只推进墙钟。"""
+
+    def __init__(self) -> None:
+        self.wall = 1_000_000.0
+        self.mono = 500.0
+
+    def time(self) -> float:
+        return self.wall
+
+    def monotonic(self) -> float:
+        return self.mono
+
+    def advance(self, s: float) -> None:
+        """正常运行: 两个钟同步推进。"""
+        self.wall += s
+        self.mono += s
+
+    def sleep(self, s: float) -> None:
+        """系统睡眠: 只有墙钟推进。"""
+        self.wall += s
+
+
+def _make_tracker(clock: _FakeClock, **kwargs) -> SleepTracker:
+    return SleepTracker(wall_clock=clock.time, mono_clock=clock.monotonic, **kwargs)
+
+
+def test_sleep_tracker_ignores_normal_runtime() -> None:
+    """正常运行 (两钟同步推进) 不报睡眠。"""
+    clock = _FakeClock()
+    tracker = _make_tracker(clock)
+
+    clock.advance(120.0)
+    assert tracker.slept_since_last_check() == 0.0
+
+    clock.advance(3600.0)  # 连续跑一小时也不该误报
+    assert tracker.slept_since_last_check() == 0.0
+
+
+def test_sleep_tracker_detects_sleep_duration() -> None:
+    """睡眠 948s 被准确测出。"""
+    clock = _FakeClock()
+    tracker = _make_tracker(clock)
+
+    clock.advance(60.0)
+    tracker.slept_since_last_check()  # 建立基线
+
+    clock.sleep(948.0)
+    assert tracker.slept_since_last_check() == 948.0
+
+
+def test_sleep_tracker_baseline_advances_after_sleep() -> None:
+    """睡眠只报一次, 不会在后续轮次重复计入。"""
+    clock = _FakeClock()
+    tracker = _make_tracker(clock)
+
+    clock.sleep(600.0)
+    assert tracker.slept_since_last_check() == 600.0
+    assert tracker.slept_since_last_check() == 0.0  # 基线已推进
+
+    clock.advance(30.0)
+    assert tracker.slept_since_last_check() == 0.0
+
+
+def test_sleep_tracker_ignores_short_jitter() -> None:
+    """调度抖动/时钟微调 (2s) 不算睡眠。"""
+    clock = _FakeClock()
+    tracker = _make_tracker(clock)
+
+    clock.sleep(2.0)
+    assert tracker.slept_since_last_check() == 0.0
+
+
+def test_watcher_sleep_tolerance_derives_from_stale_threshold(monkeypatch) -> None:
+    """容差必须随陈旧阈值缩放, 否则调小阈值后睡眠漏检会让误报复发。
+
+    误报必要条件: quote_age >= 阈值, 而 quote_age >= 睡眠时长
+    ⇒ 任何 ≥ 阈值的睡眠都必须能被测到, 即容差必须 < 阈值。
+    """
+    from app.config import settings
+
+    for floor_s in (60.0, 20.0, 10.0):
+        monkeypatch.setattr(settings, "quote_health_min_stale_s", floor_s)
+        watcher = QuoteHealthWatcher(
+            lambda: None,
+            rebuild_cb=lambda: None,
+            exit_cb=lambda code: None,
+        )
+        assert watcher._sleep_tracker._tolerance_s < floor_s
+
+
+def _run_once_sync(watcher: QuoteHealthWatcher) -> None:
+    asyncio.run(watcher._run_once())
+
+
+def _watcher_with_clock(clock: _FakeClock, **kwargs) -> QuoteHealthWatcher:
+    watcher = QuoteHealthWatcher(**kwargs)
+    watcher._sleep_tracker = _make_tracker(clock)
+    return watcher
+
+
+def test_watcher_discards_probe_after_sleep() -> None:
+    """唤醒后第一轮探测作废: stale 不计数, 不重建, 不退出。"""
+    clock = _FakeClock()
+    probes: list[int] = []
+    rebuilds: list[int] = []
+    exits: list[int] = []
+    stale_exc = QuotePoolStale("quote_age=3628271ms > 18000ms 但探针可达源 → 池僵死")
+
+    def probe() -> None:
+        probes.append(1)
+        raise stale_exc
+
+    watcher = _watcher_with_clock(
+        clock,
+        probe=probe,
+        rebuild_cb=lambda: rebuilds.append(1),
+        exit_cb=exits.append,
+        rebuild_threshold=1,  # 阈值放到 1: 若不跳过, 第一次就会重建
+        exit_threshold=10,
+    )
+
+    clock.sleep(948.0)  # 睡眠 → 唤醒瞬间探针读到睡前旧 age
+    _run_once_sync(watcher)
+
+    assert probes == []  # 探针根本没跑
+    assert rebuilds == []  # 没有误重建
+    assert exits == []
+    assert watcher._sleep_skips == 1
+    assert watcher._stale_count == 0
+    assert watcher._last_sleep_s == 948.0
+
+
+def test_watcher_judges_normally_after_sleep_round_skipped() -> None:
+    """作废一轮后, 下一轮恢复正常判定 (该重建还是要重建)。"""
+    clock = _FakeClock()
+    rebuilds: list[int] = []
+    stale_exc = QuotePoolStale("stale")
+    calls = {"n": 0}
+
+    def probe() -> None:
+        calls["n"] += 1
+        raise stale_exc
+
+    watcher = _watcher_with_clock(
+        clock,
+        probe=probe,
+        rebuild_cb=lambda: rebuilds.append(1),
+        exit_cb=lambda code: None,
+        rebuild_threshold=2,
+        exit_threshold=10,
+    )
+
+    clock.sleep(300.0)
+    _run_once_sync(watcher)  # 作废
+    assert calls["n"] == 0
+    assert rebuilds == []
+
+    _run_once_sync(watcher)  # 真探测 1
+    assert calls["n"] == 1
+    assert rebuilds == []
+
+    _run_once_sync(watcher)  # 真探测 2 → 达阈值重建
+    assert rebuilds == [1]  # 重建发生
+    # 达阈值后 watcher 会立刻补一次「重建后验证探测」, 故为 3 次而非 2 次
+    assert calls["n"] == 3
+
+
+def test_watcher_sleep_does_not_clear_ongoing_stale_cycle() -> None:
+    """睡眠作废不能把正在累积的僵死计数清零 (否则真僵死会被睡眠掩盖)。"""
+    clock = _FakeClock()
+    stale_exc = QuotePoolStale("stale")
+    watcher = _watcher_with_clock(
+        clock,
+        probe=lambda: (_ for _ in ()).throw(stale_exc),
+        rebuild_cb=lambda: None,
+        exit_cb=lambda code: None,
+        rebuild_threshold=5,
+        exit_threshold=10,
+    )
+
+    _run_once_sync(watcher)
+    _run_once_sync(watcher)
+    assert watcher._stale_count == 2
+
+    clock.sleep(400.0)
+    _run_once_sync(watcher)  # 作废, 但计数保持
+
+    assert watcher._stale_count == 2
+    assert watcher._sleep_skips == 1
+
+

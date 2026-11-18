@@ -224,10 +224,12 @@ class Settings(BaseSettings):
     quote_health_exit_threshold: int = 10
     quote_health_stale_intervals: int = 3  # quote_age > interval * stale_intervals 即陈旧
     # 陈旧阈值绝对下限 (秒)。轮询循环每轮还含监控评估 + 模拟盘撮合 (实测 15-20s,
-    # p99 相邻刷新间隔 35s), 单靠 interval * stale_intervals (=18s @6s 轮询) 会把
-    # 正常评估耗时误判成池僵死 —— 2026-11-18 盘中因此每 6 分钟触发一次误报。
+    # p99 相邻刷新间隔 30s, max 173s), 单靠 interval * stale_intervals (=18s @6s 轮询)
+    # 会把正常评估耗时误判成池僵死 —— 2026-11-18 盘中因此每 6 分钟触发一次误报。
     # 取 max(相对阈值, 本下限): 快轮询源用下限, 慢轮询源 (interval 可达 60s) 仍用相对值。
-    quote_health_min_stale_s: float = 90.0
+    # 60s 而非更大: 剔除睡眠窗口后 >60s 的间隔仅占 0.19%, 与 90s 同档; 但真僵死早 30s
+    # 发现更有价值。与 quote_freshness.QuoteFreshness.max_age_ms 的下限口径保持一致。
+    quote_health_min_stale_s: float = 60.0
 
     # 策略批量执行 (run_all / 策略页全量跑) 的并发 worker 上限。实测 2026-09-07:
     # polars eager 操作内部已多线程并行, 外层再并发 4 worker 属超订, 41 策略

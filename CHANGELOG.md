@@ -57,8 +57,21 @@
   阈值原为 `interval × stale_intervals` (= 18s @6s 轮询), 但轮询循环每轮还串行跑监控
   评估 + 模拟盘撮合, 实测 15-20s (当日 p90 相邻刷新间隔 21s, p99 35s), 于是每 6 分钟
   误报一次并触发一次没必要的重建。改为 `max(interval × stale_intervals, 绝对下限)`,
-  新增 `quote_health_min_stale_s` (默认 90s) 兜住评估耗时; 慢轮询源 (60s) 仍按倍数放大。
-  用当日日志回放: 池僵死信号从 21 次降到 11 次, 剩余全部落在源确实被打死的故障段。
+  新增 `quote_health_min_stale_s` (默认 60s) 兜住评估耗时; 慢轮询源 (60s) 仍按倍数放大。
+  用当日日志回放: 评估耗时类误报 (18s 档 7 次) 全部消除, 真实故障检测提前约 1 分钟。
+
+- **睡眠唤醒被误判成池僵死** (2026-11-18):
+  探针在系统 DarkWake 瞬间先于行情轮询线程恢复, 读到的是睡眠前留下的旧 `quote_age`
+  (11-18 13:09:02 实测 3628s = 60.5 分钟, 其中 33 分钟是睡眠, 剩余是午休不轮询的清醒时间),
+  于是把「刚睡醒」当成池僵死。历史大值触发 7/7 全部落在 DarkWake 时刻。
+  关键前提: `time.perf_counter()` 在 macOS 是 `CLOCK_UPTIME_RAW`、在 Linux 是
+  `CLOCK_MONOTONIC`, 两者都**不计入** suspend —— 所以 age 本身不会因睡眠虚高, 是唤醒竞态
+  让探针读到了尚未刷新的旧值。
+  修复: 新增 `SleepTracker` (基于「墙钟 − 单调钟」偏移的增量, 正常运行恒定、只在睡后跳变,
+  无需读系统日志也无需任何权限), 唤醒后第一轮探测直接作废 —— 既不计僵死 (防误重建),
+  也不清零 (防真僵死在睡眠中漏报)。容差取阈值的一半, 保证「长到能顶破阈值的睡眠」
+  必定被测到。回放全部日志: 45 次大值触发中 13 次识别为唤醒作废, 32 次真实故障阶梯
+  (82→142→202→263→323→383s) 照常判定, 无延迟。
 
 ### Changed
 
@@ -83,14 +96,16 @@
 | `quote_health_rebuild_threshold` | `3` | 软重建触发阈值 (连续僵死次数) |
 | `quote_health_exit_threshold` | `10` | 硬退出触发阈值 |
 | `quote_health_stale_intervals` | `3` | quote_age > interval × stale_intervals 即陈旧 |
-| `quote_health_min_stale_s` | `90.0` | 陈旧阈值绝对下限 (秒); 实际阈值取 max(相对, 本值) |
+| `quote_health_min_stale_s` | `60.0` | 陈旧阈值绝对下限 (秒); 实际阈值取 max(相对, 本值) |
 
 ### Tests
 
-新增 `backend/tests/test_quote_health.py` (13 个测试):
+新增 `backend/tests/test_quote_health.py` (25 个测试):
 
 - 5 个 watcher 场景 (健康/陈旧重建/恢复复位/僵死退出/源宕不重建)
 - 7 个 `quote_probe` 单元测试 (双信号诊断各分支)
 - 1 个 pipeline 暂停期间不探测 (`test_probe_skips_when_paused`)
+- 3 个陈旧阈值测试 (下限主导/相对值主导/随 stale_intervals 缩放)
+- 8 个睡眠唤醒检测测试 (`SleepTracker` 四态 + watcher 作废/恢复判定/不清零僵死周期/容差随阈值派生)
 
 `backend/tests/test_watchdog.py` (4 个) 无回归。
