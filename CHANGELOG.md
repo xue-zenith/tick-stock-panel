@@ -45,6 +45,21 @@
   根因: 当时只检查 `mining_manager` (管挖掘任务), 不检查 `job_store` (管 pipeline)。
   修复: `quote_probe` 新增 `job_store.active_id()` 检查。
 
+- **自愈重建把数据源永久打死** (2026-11-18):
+  `rebuild_realtime_client()` 用 `getattr(provider, "close")` 取重建入口, 但
+  `get_provider()` 返回的是 `ManagedProvider` handle, `close()` 命中 handle 自己的实现
+  → 标记 `_current[2]=True` 永久停用 → 此后每轮抛「数据源已停止」→ age 一路涨到 10/10
+  → `os._exit(70)`。表现为"不重建还能自己恢复, 一重建必死", 11-13 起每日 1-2 次重启。
+  修复: `ManagedProvider` 新增 `rebuild_client()` 转发到内层 provider (持锁计入在途引用,
+  避免被 `replace()` 提前关闭), `rebuild_realtime_client()` 只走该入口。
+
+- **陈旧阈值把正常评估耗时误判成池僵死** (2026-11-18):
+  阈值原为 `interval × stale_intervals` (= 18s @6s 轮询), 但轮询循环每轮还串行跑监控
+  评估 + 模拟盘撮合, 实测 15-20s (当日 p90 相邻刷新间隔 21s, p99 35s), 于是每 6 分钟
+  误报一次并触发一次没必要的重建。改为 `max(interval × stale_intervals, 绝对下限)`,
+  新增 `quote_health_min_stale_s` (默认 90s) 兜住评估耗时; 慢轮询源 (60s) 仍按倍数放大。
+  用当日日志回放: 池僵死信号从 21 次降到 11 次, 剩余全部落在源确实被打死的故障段。
+
 ### Changed
 
 - **`GenericHTTPProvider` 新增 `rebuild_client()` 方法** (`app/data_providers/custom/provider.py`):
@@ -68,6 +83,7 @@
 | `quote_health_rebuild_threshold` | `3` | 软重建触发阈值 (连续僵死次数) |
 | `quote_health_exit_threshold` | `10` | 硬退出触发阈值 |
 | `quote_health_stale_intervals` | `3` | quote_age > interval × stale_intervals 即陈旧 |
+| `quote_health_min_stale_s` | `90.0` | 陈旧阈值绝对下限 (秒); 实际阈值取 max(相对, 本值) |
 
 ### Tests
 

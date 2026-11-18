@@ -146,6 +146,18 @@ class SourceUnavailable(Exception):  # noqa: N818
     """独立探针探不到源 —— 源/网络问题, 不重建 (重建无用)。"""
 
 
+def quote_stale_threshold_ms(interval_s: float) -> float:
+    """quote_age 陈旧阈值: max(轮询间隔 × stale_intervals, 绝对下限)。
+
+    轮询循环每轮不止取数, 还串行跑监控评估 + 模拟盘撮合 (实测 15-20s,
+    p99 相邻刷新间隔 35s)。只用 interval × 倍数时, 6s 轮询算出 18s 阈值,
+    正常评估就已越界 —— 2026-11-18 盘中每 6 分钟误报一次池僵死。
+    绝对下限兜住评估耗时, 相对项保证慢轮询源 (interval 可达 60s) 仍按倍数放大。
+    """
+    relative_ms = float(interval_s) * 1000 * settings.quote_health_stale_intervals
+    return max(relative_ms, settings.quote_health_min_stale_s * 1000)
+
+
 def quote_probe(qs, probe_http: httpx.Client, mining_manager=None) -> None:
     """双信号探测 QuoteService 连接池健康度。
 
@@ -185,7 +197,7 @@ def quote_probe(qs, probe_http: httpx.Client, mining_manager=None) -> None:
         pass
     age = st.get("quote_age_ms")
     interval = st.get("interval_s") or 0.0
-    stale_threshold_ms = interval * 1000 * settings.quote_health_stale_intervals
+    stale_threshold_ms = quote_stale_threshold_ms(interval)
     if age is None or interval <= 0 or age < stale_threshold_ms:
         return  # 健康
     # quote_age 陈旧 → 独立探针确认源是否可达

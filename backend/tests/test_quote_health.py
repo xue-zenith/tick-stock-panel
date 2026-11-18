@@ -10,6 +10,7 @@ from app.watchdog import (
     QuotePoolStale,
     SourceUnavailable,
     quote_probe,
+    quote_stale_threshold_ms,
 )
 
 # ================================================================
@@ -230,17 +231,28 @@ def test_probe_non_polling_window_returns_clean(fuyao_provider) -> None:
     quote_probe(qs, http)  # 不抛即通过
 
 
+def _stale_age_ms(interval: float = 6.0) -> int:
+    """超过陈旧阈值 1s 的 age, 不依赖阈值具体取值。"""
+    return int(quote_stale_threshold_ms(interval)) + 1000
+
+
 def test_probe_healthy_age_returns_clean(fuyao_provider) -> None:
     """age 未陈旧: probe 正常返回 (不抛, 不调探针)。"""
     qs = FakeQuoteService(_make_status(age_ms=1000, polling=True, interval=6.0))
-    # stale_threshold = 6 * 1000 * 3 = 18000ms; age=1000 远小于 → 健康
+    http = FakeHTTPClient([RuntimeError("不该被调用")])  # 探针不该触发
+    quote_probe(qs, http)  # 不抛即通过
+
+
+def test_probe_skips_evaluation_sized_gap(fuyao_provider) -> None:
+    """监控评估耗时的 age (20s) 不算陈旧 —— 2026-11-18 误报回归。"""
+    qs = FakeQuoteService(_make_status(age_ms=20_000, polling=True, interval=6.0))
     http = FakeHTTPClient([RuntimeError("不该被调用")])  # 探针不该触发
     quote_probe(qs, http)  # 不抛即通过
 
 
 def test_probe_stale_and_reachable_raises_pool_stale(fuyao_provider) -> None:
     """age 陈旧 + 探针可达 → QuotePoolStale。"""
-    qs = FakeQuoteService(_make_status(age_ms=60_000, polling=True, interval=6.0))
+    qs = FakeQuoteService(_make_status(age_ms=_stale_age_ms(), polling=True, interval=6.0))
     http = FakeHTTPClient([FakeResponse(200, {"code": 0})])
     try:
         quote_probe(qs, http)
@@ -251,7 +263,7 @@ def test_probe_stale_and_reachable_raises_pool_stale(fuyao_provider) -> None:
 
 def test_probe_stale_and_source_down_raises_source_unavailable(fuyao_provider) -> None:
     """age 陈旧 + 探针 HTTP 500 → SourceUnavailable (不重建)。"""
-    qs = FakeQuoteService(_make_status(age_ms=60_000, polling=True, interval=6.0))
+    qs = FakeQuoteService(_make_status(age_ms=_stale_age_ms(), polling=True, interval=6.0))
     http = FakeHTTPClient([FakeResponse(500)])
     try:
         quote_probe(qs, http)
@@ -262,7 +274,7 @@ def test_probe_stale_and_source_down_raises_source_unavailable(fuyao_provider) -
 
 def test_probe_stale_and_network_error_raises_source_unavailable(fuyao_provider) -> None:
     """age 陈旧 + 探针网络异常 → SourceUnavailable。"""
-    qs = FakeQuoteService(_make_status(age_ms=60_000, polling=True, interval=6.0))
+    qs = FakeQuoteService(_make_status(age_ms=_stale_age_ms(), polling=True, interval=6.0))
     http = FakeHTTPClient([RuntimeError("connection reset")])
     try:
         quote_probe(qs, http)
@@ -273,7 +285,7 @@ def test_probe_stale_and_network_error_raises_source_unavailable(fuyao_provider)
 
 def test_probe_stale_and_fuyao_code_error_raises_source_unavailable(fuyao_provider) -> None:
     """age 陈旧 + 探针返回 code != 0 → SourceUnavailable (源侧错误)。"""
-    qs = FakeQuoteService(_make_status(age_ms=60_000, polling=True, interval=6.0))
+    qs = FakeQuoteService(_make_status(age_ms=_stale_age_ms(), polling=True, interval=6.0))
     http = FakeHTTPClient([FakeResponse(200, {"code": 4001, "message": "rate limited"})])
     try:
         quote_probe(qs, http)
@@ -308,3 +320,28 @@ def test_probe_skips_when_paused(fuyao_provider) -> None:
     # age 陈旧 + polling=True + paused=True → 应直接返回, 不触发探针
     http = FakeHTTPClient([RuntimeError("不该被调用")])
     quote_probe(qs, http)  # 不抛即通过
+
+
+# ================================================================
+# 场景 (h) 陈旧阈值 = max(interval × stale_intervals, 绝对下限)
+# ================================================================
+
+
+def test_stale_threshold_floor_dominates_fast_polling() -> None:
+    """快轮询 (1-30s) 全部落在绝对下限上, 不随 interval 缩小。"""
+    floor_ms = 90_000
+    for interval in (1.0, 3.0, 6.0, 10.0, 30.0):
+        assert quote_stale_threshold_ms(interval) == floor_ms
+
+
+def test_stale_threshold_relative_wins_on_slow_polling() -> None:
+    """慢轮询 (60s × 3 = 180s) 超过下限, 用相对值, 保持原倍数语义。"""
+    assert quote_stale_threshold_ms(60.0) == 180_000
+
+
+def test_stale_threshold_tracks_stale_intervals(monkeypatch) -> None:
+    """调大 stale_intervals 时慢轮询阈值随之放大。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "quote_health_stale_intervals", 5)
+    assert quote_stale_threshold_ms(60.0) == 300_000
