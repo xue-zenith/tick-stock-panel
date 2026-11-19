@@ -180,7 +180,10 @@ class TdxQuantClient:
         logger.warning("TdxQuant 原生层预热未成功(%d 次), 首批业务调用可能失败重试", attempts)
 
     def close(self) -> None:  # 原生 DLL 常驻进程, 无可回收句柄; 保留接口对齐 loader
-        self._universe.clear()
+        """无可回收句柄。刻意不清 _universe: 它是纯缓存 (12h TTL 自己会失效),
+        在途的 stock_universe() 若正好落在「判缓存命中」与「拷贝」之间, 会被
+        清成空列表 → 本轮 0 条行情。生命周期由 provider 的引用切换表达。
+        """
 
     # ---- 原生调用(重试包装) ----
     def _raw(self, method: str, *args):

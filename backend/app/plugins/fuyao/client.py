@@ -99,30 +99,65 @@ class FuyaoUnknownSymbolError(FuyaoError):
 
 
 class FuyaoClient:
-    """扶摇 REST 客户端 (线程安全: httpx.Client 可并发复用)。"""
+    """扶摇 REST 客户端 (线程安全: httpx.Client 可并发复用)。
+
+    httpx.Client 可以多线程共用, 但 close() 是销毁性的: 实测在请求在途时关闭,
+    在途请求会以 ReadTimeout 失败 (不是 ConnectionError), 看起来像网络问题,
+    掩盖真正的原因。所以请求走引用计数: close() 只标记, 等最后一个在途请求
+    归还租约才真正关 httpx.Client。
+    """
 
     def __init__(self, api_key: str, base_url: str = BASE_URL, timeout: float = 20.0) -> None:
         if not api_key:
             raise FuyaoError("未配置 FUYAO_API_KEY")
         self.last_server_ts = 0  # 最近一页响应里的服务端时间戳(ms), 供行情归属
+        self._lock = Lock()
+        self._leases = 0
+        self._retired = False
         self._http = httpx.Client(
             base_url=base_url,
             headers={"X-api-key": api_key},
             timeout=timeout,
         )
 
+    def _begin_request(self) -> None:
+        with self._lock:
+            if self._retired:
+                raise FuyaoError("扶摇客户端已关闭")
+            self._leases += 1
+
+    def _end_request(self) -> None:
+        with self._lock:
+            self._leases -= 1
+            close = self._retired and self._leases == 0
+        if close:
+            self._http.close()
+
     def close(self) -> None:
-        self._http.close()
+        """标记关闭; 在途请求归还租约后才真正关 httpx.Client。重复调用无副作用。"""
+        with self._lock:
+            if self._retired:
+                return
+            self._retired = True
+            close = self._leases == 0
+        if close:
+            self._http.close()
 
     # ---- 内部 ----
     def _get(self, path: str, params: dict) -> dict:
         """GET + 信封解包。code != 0 时抛 FuyaoError(含 code 与 message)。"""
         for attempt in range(_RATE_LIMIT_RETRIES + 1):
             _REQUEST_LIMITER.wait()
+            # 租约只覆盖这一次 HTTP 往返: httpx 非流式请求返回时响应体已读完,
+            # 之后 resp.json() 不依赖连接, 所以不必把限流退避的 sleep 也算进来
+            # (那会把 close() 拖到最多 30s)。
+            self._begin_request()
             try:
                 resp = self._http.get(path, params=params)
             except httpx.HTTPError as e:
                 raise FuyaoError(f"网络请求失败: {e}") from e
+            finally:
+                self._end_request()
             if resp.status_code == 429:
                 retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
                 if attempt >= _RATE_LIMIT_RETRIES:

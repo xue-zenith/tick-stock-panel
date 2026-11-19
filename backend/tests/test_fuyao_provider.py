@@ -37,6 +37,7 @@ class _FakeClient:
         self.server_ts = server_ts
         self.calls: list[dict] = []
         self.last_server_ts = server_ts
+        self.closed = False
 
     def snapshot_page(self, limit=500, offset=0):
         self.calls.append({"limit": limit, "offset": offset})
@@ -65,7 +66,7 @@ class _FakeClient:
         return out, self.server_ts
 
     def close(self):
-        pass
+        self.closed = True
 
 
 def _row(thscode: str = "600519.SH", **over):
@@ -569,6 +570,68 @@ def test_close_is_idempotent(monkeypatch):
     provider, _ = _provider_with(monkeypatch, [[_row()]])
     provider.close()
     provider.close()
+
+
+# ---- 自愈重建 / 客户端生命周期 ----
+
+def test_rebuild_client_keeps_dump_cache(monkeypatch):
+    """自愈重建只换客户端, 不能顺手清掉 dump 缓存 (清一次多一次 API 往返)。"""
+    provider, _ = _provider_with(monkeypatch, [[_row()]])
+    provider._get_client()
+    provider._dump_memo["daily-k-10d"] = "frame"
+    provider._dump_path_memo["daily-k"] = "/cache/daily_k.parquet"
+
+    provider.rebuild_client()
+
+    assert provider._dump_memo == {"daily-k-10d": "frame"}
+    assert provider._dump_path_memo == {"daily-k": "/cache/daily_k.parquet"}
+    assert provider._client is None  # 下次取数重新构造
+
+
+def test_close_drops_dump_cache(monkeypatch):
+    """close() 是撤销数据源, 与重建语义不同: 缓存一起丢。"""
+    provider, _ = _provider_with(monkeypatch, [[_row()]])
+    provider._get_client()
+    provider._dump_memo["daily-k-10d"] = "frame"
+
+    provider.close()
+
+    assert provider._dump_memo == {}
+    assert provider._client is None
+
+
+def test_rebuild_client_closes_old_client(monkeypatch):
+    provider, fake = _provider_with(monkeypatch, [[_row()]])
+    provider._get_client()
+    provider.rebuild_client()
+    assert fake.closed is True
+
+
+def test_get_client_constructs_once_under_concurrency(monkeypatch):
+    """并发首轮取数只能造一个客户端; 否则多出来的永远无人 close。"""
+    import threading
+
+    made = []
+
+    class _Slow:
+        def __init__(self, **kw):
+            made.append(self)
+            threading.Event().wait(0.1)
+        def close(self):
+            pass
+
+    monkeypatch.setattr(fp, "fuyao_client", type("M", (), {"FuyaoClient": _Slow}))
+    monkeypatch.setattr(fp, "get_api_key", lambda: "test-key")
+    provider = FuyaoProvider()
+
+    threads = [threading.Thread(target=provider._get_client) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(made) == 1
+    assert provider._client is made[0]
 
 
 # =====================================================================

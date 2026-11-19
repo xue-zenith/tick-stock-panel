@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,9 +38,10 @@ class _FakeClient:
         self.his_calls: list[dict] = []
         self.events: dict[str, object] = {}  # code -> list[dict] | Exception
         self.event_calls: list[dict] = []
+        self.closed = False
 
     def close(self) -> None:
-        pass
+        self.closed = True
 
     def stock_universe(self) -> list[str]:
         if self.universe_error:
@@ -867,3 +869,88 @@ def test_close_resets_client():
     p = _provider(fake)
     p.close()
     assert p._client is None
+
+
+# ---- 自愈重建 / 客户端生命周期 ----
+
+def test_rebuild_client_releases_old_client():
+    """自愈重建要关掉旧客户端 (否则 TdxQuantClient 的股票池缓存两套并存)。"""
+    fake = _FakeClient()
+    p = _provider(fake)
+    p.rebuild_client()
+    assert fake.closed is True
+    assert p._client is None  # 下次取数重新构造
+
+
+def test_rebuild_client_keeps_provider_usable():
+    p = _provider(_FakeClient())
+    replacement = _FakeClient()
+    p.rebuild_client()
+    p._client = replacement
+    assert p.get_realtime() is not None
+
+
+def test_get_client_constructs_once_under_concurrency(monkeypatch):
+    """并发首轮取数只能造一个客户端; 每个孤儿都要 materialize_lib + _warmup。"""
+    import threading
+
+    made = []
+
+    class _Slow:
+        def __init__(self, **kw):
+            made.append(self)
+            threading.Event().wait(0.1)
+        def close(self):
+            pass
+
+    monkeypatch.setattr(tp, "TdxQuantClient", _Slow)
+    monkeypatch.setattr(tp, "get_api_key", lambda: "test-key")
+    p = TdxQuantProvider()
+    p._client = None
+
+    threads = [threading.Thread(target=p._get_client) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(made) == 1
+    assert p._client is made[0]
+
+
+# ---- 股票池缓存与 close() ----
+
+def _lazy_client(universe: list[str]):
+    """绕过原生库构造, 直接测 stock_universe() 的缓存语义。"""
+    from app.plugins.tdxquant import client as tdx_client
+
+    class _Tqs:
+        calls = 0
+
+        def get_stock_list(self, market=None, list_type=0):
+            _Tqs.calls += 1
+            return [f"{market}.000001"]
+
+    c = tdx_client.TdxQuantClient.__new__(tdx_client.TdxQuantClient)
+    c._tqs = _Tqs()
+    c.api_key = "test-key"
+    c._universe = list(universe)
+    c._universe_at = time.time()
+    return c, _Tqs
+
+
+def test_close_keeps_stock_universe_cache():
+    """close() 不清股票池: 它是纯缓存, 与句柄无关。"""
+    c, _ = _lazy_client(["SH.600519", "SZ.000001"])
+    c.close()
+    assert c._universe == ["SH.600519", "SZ.000001"]
+
+
+def test_close_during_universe_read_does_not_return_empty():
+    """在途 close() 不能把本轮 reading 清成 0 条行情。"""
+    import threading
+
+    c, tqs = _lazy_client(["SH.600519", "SZ.000001"])
+    threading.Timer(0.02, c.close).start()
+    assert len(c.stock_universe()) == 2
+    assert tqs.calls == 0  # 命中缓存, 不该被迫重新枚举

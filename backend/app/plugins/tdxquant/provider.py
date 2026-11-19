@@ -32,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -404,6 +405,7 @@ class TdxQuantProvider:
     def __init__(self) -> None:
         self.config = _TdxQuantConfig()
         self._client: TdxQuantClient | None = None
+        self._client_lock = threading.Lock()
         self._auth_failed_at: float | None = None
         self._auth_failure_reason = ""
 
@@ -430,15 +432,36 @@ class TdxQuantProvider:
         return "返回空数据" in str(e)
 
     def close(self) -> None:  # loader.load_all 重建注册表时会对每个 provider 调 close
-        if self._client is not None:
+        """永久停用: 丢掉客户端引用。自愈重建请用 rebuild_client()。"""
+        with self._client_lock:
+            client, self._client = self._client, None
+        if client is not None:
             with contextlib.suppress(Exception):
-                self._client.close()
-            self._client = None
+                client.close()
+
+    def rebuild_client(self) -> None:
+        """只换客户端引用 (自愈路径), 与 close() 分开。
+
+        TdxQuantClient 本身没有可销毁的网络句柄 (原生 DLL 常驻), close() 只是
+        清股票池缓存; 这里换引用即可, 下次取数会重新构造 (实测 304ms, 含
+        materialize_lib 与 _warmup)。保留 close() 供 loader 撤销数据源时用。
+        """
+        with self._client_lock:
+            client, self._client = self._client, None
+        if client is not None:
+            with contextlib.suppress(Exception):
+                client.close()
 
     def _get_client(self) -> TdxQuantClient:
-        if self._client is None:
-            self._client = TdxQuantClient(api_key=get_api_key())
-        return self._client
+        # 双检: 否则并发首轮取数会各建一个 TdxQuantClient, 只有一个被留下,
+        # 其余成为孤儿 (每个都要 materialize_lib + _warmup, 实测 304ms)。
+        client = self._client
+        if client is not None:
+            return client
+        with self._client_lock:
+            if self._client is None:
+                self._client = TdxQuantClient(api_key=get_api_key())
+            return self._client
 
     # ---- realtime ----
     def get_realtime(self) -> list[dict]:

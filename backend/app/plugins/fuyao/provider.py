@@ -31,6 +31,7 @@ import contextlib
 import logging
 import math
 import re
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -320,21 +321,44 @@ class FuyaoProvider:
     def __init__(self) -> None:
         self.config = _FuyaoConfig()
         self._client: FuyaoClient | None = None
+        self._client_lock = threading.Lock()
         self._dump_memo: dict[str, pl.DataFrame] = {}
         self._dump_path_memo: dict[str, Path] = {}
 
     def close(self) -> None:  # loader.load_all 重建注册表时会对每个 provider 调 close
-        if self._client is not None:
+        """永久停用: 关客户端并丢弃 dump 缓存。自愈重建请用 rebuild_client()。"""
+        with self._client_lock:
+            client, self._client = self._client, None
+        if client is not None:
             with contextlib.suppress(Exception):
-                self._client.close()
-            self._client = None
+                client.close()
         self._dump_memo.clear()
         self._dump_path_memo.clear()
 
+    def rebuild_client(self) -> None:
+        """只换 HTTP 客户端, 保留 dump 缓存 (自愈路径)。
+
+        必须与 close() 分开: close() 会连 _dump_memo/_dump_path_memo 一起清掉,
+        每清一次就要多一次 dump_download_url 往返 (实测 136-399ms) 加一次 parquet
+        重读。旧客户端交给 FuyaoClient.close(), 它按在途租约推迟真正的 httpx 关闭,
+        所以在跑的行情请求不会被打断。
+        """
+        with self._client_lock:
+            client, self._client = self._client, None
+        if client is not None:
+            with contextlib.suppress(Exception):
+                client.close()
+
     def _get_client(self) -> FuyaoClient:
-        if self._client is None:
-            self._client = fuyao_client.FuyaoClient(api_key=get_api_key())
-        return self._client
+        # 双检: 首次取数时 32 路并发 (kline_sync 的线程池) 都读到 None 会各建一个,
+        # 只有一个被留下, 其余变成永远无人 close 的孤儿 (实测 32 线程造 32 个)。
+        client = self._client
+        if client is not None:
+            return client
+        with self._client_lock:
+            if self._client is None:
+                self._client = fuyao_client.FuyaoClient(api_key=get_api_key())
+            return self._client
 
     # ---- dump 缓存 ----
     def _ensure_dump_path(self, dump_kind: str, cache_prefix: str) -> Path:

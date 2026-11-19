@@ -33,6 +33,32 @@
 
 ### Fixed
 
+- **扶摇/通达信插件没有 `rebuild_client()`, 自愈退化成销毁性 `close()`** (2026-11-18):
+  `ManagedProvider.rebuild_client()` 在内层 provider 没有该方法时回退到 `close()`。
+  `FuyaoProvider.close()` 直接 `self._client.close()`, 而 `FuyaoClient.close()` 是
+  `httpx.Client.close()` —— **在途请求会被打断**. 实测: 请求在途时关闭同一个 client,
+  该请求以 `ReadTimeout: timed out` 失败 (不是 `ConnectionError`), 看起来像网络抖动,
+  真正的原因被掩盖。`TdxQuantProvider` 同构。
+  修复: 两个 provider 各自新增 `rebuild_client()`, 与 `close()` 语义分开 ——
+  `rebuild_client()` 只换客户端引用 (保留 dump 缓存), `close()` 撤销数据源 (缓存一起丢)。
+  `FuyaoClient` 内部改为引用计数: `close()` 只置 `_retired`, 等最后一个在途请求归还
+  租约才真正关 `httpx.Client`。租约只覆盖一次 HTTP 往返, 不含限流退避的 sleep
+  (否则 `close()` 会被拖到最多 30s)。
+
+- **`_get_client()` 检查-再执行竞态, 并发首轮造出多个孤儿客户端** (2026-11-18):
+  `FuyaoProvider._get_client()` / `TdxQuantProvider._get_client()` 都是裸
+  `if self._client is None: self._client = ...`, 无锁。`kline_sync` 用 32 线程池派发,
+  首轮并发全部读到 `None` → 各建一个 → 只有一个被留下, 其余成为再无引用的孤儿
+  (其 `httpx.Client` 永不 close; tdxquant 每个还要 `materialize_lib` + `_warmup`,
+  实测 304ms)。实测: 32 线程并发 → 构造 32 个。
+  修复: 改双检锁, 实测构造 1 个。
+
+- **`TdxQuantClient.close()` 清空 `_universe`, 打在途读取就返回 0 条行情** (2026-11-18):
+  `stock_universe()` 的缓存命中分支是「判 `_universe` 非空」→ 稍后「`list(_universe)`」。
+  若 `close()` 的 `clear()` 落在两步之间, 该次调用返回空列表 → 本轮 0 条行情。
+  修复: `close()` 不再碰 `_universe` —— 它是纯缓存 (12h TTL 自己会失效), 与句柄无关,
+  生命周期由 provider 的引用切换表达。
+
 - **`'Client' object has no attribute 'snapshot_all'`** (2026-10-27):
   `rebuild_realtime_client()` 兜底分支用裸 `httpx.Client` 替换了 `FuyaoProvider._client`
   (本应是 `FuyaoClient`, 有 `snapshot_all` / `dump_download_url` 等方法), 导致行情拉取
@@ -212,3 +238,46 @@
 
 `backend/tests/test_minute_provider_stream.py:223,227` 的 `_client.is_closed` 断言随内部
 结构改为 `_current[0].is_closed`。
+
+新增 `backend/tests/test_fuyao_client_lease.py` (6 个测试, 覆盖 `FuyaoClient` 的租约):
+
+- `test_in_flight_request_survives_close`: **真实 httpx + 本地慢服务**, 请求在途时
+  `close()`, 该请求必须正常返回 (直接复现修复前的 `ReadTimeout`)
+- `test_close_defers_http_close_until_last_lease_returns`: 关了但请求未返回时,
+  底层 `httpx.Client` 不能被销毁; 最后一个租约归还后才关
+- `test_close_is_idempotent`: 重复 close 无副作用
+- `test_request_after_close_raises_instead_of_using_dead_client`: 关闭后再请求
+  立刻报「扶摇客户端已关闭」, 不拿死连接去试
+- `test_failed_request_still_releases_its_lease`: 请求抛异常仍归还租约
+- `test_no_close_when_leases_never_reach_zero_then_they_do`: 两个在途请求,
+  先归还一个不关, 最后一个才关
+
+`backend/tests/test_fuyao_provider.py` 新增 4 个, `test_tdxquant_provider.py` 新增 5 个:
+
+- `test_rebuild_client_keeps_dump_cache`: 自愈重建保留 `_dump_memo` / `_dump_path_memo`
+- `test_close_drops_dump_cache`: 与重建语义区分, `close()` 缓存一起丢
+- `test_rebuild_client_closes_old_client`: 旧客户端被关, 引用置空
+- `test_get_client_constructs_once_under_concurrency`: 16 线程并发只构造 1 个
+  (修复前 16 个, kline_sync 的 32 路并发下实测 32 个)
+- `test_rebuild_client_releases_old_client` / `test_rebuild_client_keeps_provider_usable`
+- `test_close_keeps_stock_universe_cache` / `test_close_during_universe_read_does_not_return_empty`:
+  在途 `close()` 不能把本轮读成 0 条
+
+变异验证 (每条都确认了失败):
+
+| 注入的缺陷 | 结果 |
+|---|---|
+| `rebuild_client` 退回清 dump 缓存 | 抓到 |
+| 去掉双检锁 (fuyao) | 抓到 |
+| 去掉双检锁 (tdxquant) | 抓到 |
+| `rebuild_client` 不关旧客户端 | 初版未抓到, 补测试后抓到 |
+| `close()` 恢复清 `_universe` | 初版未抓到, 补测试后抓到 |
+| `FuyaoClient.close()` 立刻硬关 (修复前形态) | 抓到 (3 个失败) |
+| 租约不在异常路径归还 | 初版未抓到, 补测试后抓到 |
+| `_end_request` 永不关 (漏关连接) | 抓到 |
+| `_begin_request` 不拒已关闭 | 抓到 |
+| `close()` 不判 `retired` 幂等 | 未抓到, **等价变异** (`httpx.Client.close()` 本身幂等, 无可见差异) |
+
+（注: `test_failed_request_still_releases_its_lease` 最初用 `127.0.0.1:1` 期望连接失败,
+但本机代理把它变成 HTTP 502 → 走的是 `except` 分支而非异常路径, 测试通过的理由是错的。
+改为 monkeypatch `client._http.get` 直接抛 `ConnectError`。）
